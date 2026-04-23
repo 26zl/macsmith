@@ -578,7 +578,7 @@ EXAMPLES:
     # Fix Oh My Zsh permissions
     ./scripts/nix-macos-maintenance.sh fix-compaudit
 
-Nix is integrated with maintain-system: 'update', 'verify', and 'versions' commands
+Nix is integrated with macsmith: 'update', 'verify', and 'versions' commands
 EOF
 }
 

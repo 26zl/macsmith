@@ -25,7 +25,13 @@ jobs:
       - name: Run ShellCheck
         uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
         env:
-          SHELLCHECK_OPTS: -e SC1090,SC1091,SC2148,SC3010,SC3030,SC3043,SC3054,SC3024,SC3014,SC3006,SC3018,SC3011,SC3001,SC3046,SC3060,SC2139,SC2296,SC2155,SC2207,SC2034,SC2012,SC2162,SC2015 -s bash -S info
+          # SC2015 (A && B || C) — removed from exclude list now that all
+          # known occurrences have been converted to proper if/fi.
+          # SC2296 is handled via inline `shellcheck disable=SC2296` at the
+          # specific zsh-only parameter expansions (search for them) so new
+          # accidental uses still fail CI. Rest are bash-vs-zsh dialect noise
+          # and style-level hints we accept.
+          SHELLCHECK_OPTS: -e SC1090,SC1091,SC2148,SC3010,SC3030,SC3043,SC3054,SC3024,SC3014,SC3006,SC3018,SC3011,SC3001,SC3046,SC3060,SC2139,SC2155,SC2207,SC2034,SC2012,SC2162 -s bash -S info
         with:
           scandir: '.'
           format: gcc

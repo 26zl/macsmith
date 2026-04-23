@@ -22,7 +22,7 @@ jobs:
   check-workflows:
     name: Check All Workflows Status
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_run'
+    # Run for every trigger so release/workflow_dispatch can't bypass CI gating
     outputs:
       all-success: ${{ steps.check.outputs.all-success }}
     steps:
@@ -36,13 +36,48 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
-            const workflowRun = context.payload.workflow_run;
-            const workflowName = workflowRun.name;
-            const conclusion = workflowRun.conclusion;
-            const headSha = workflowRun.head_sha;
-            
-            console.log(`Workflow "${workflowName}" completed with conclusion: ${conclusion}`);
-            console.log(`Checking status of all workflows for commit: ${headSha}`);
+            // Resolve the SHA we're gating on based on the trigger
+            let headSha;
+            if (context.eventName === 'workflow_run') {
+              const workflowRun = context.payload.workflow_run;
+              headSha = workflowRun.head_sha;
+              console.log(`Triggered by workflow_run "${workflowRun.name}" (conclusion: ${workflowRun.conclusion})`);
+            } else if (context.eventName === 'release') {
+              // For `release` events GITHUB_SHA is the SHA of the commit that
+              // was tagged. `target_commitish` on the release object can be
+              // a branch name (e.g. "main"), not a SHA, so filtering
+              // workflow_runs by it would miss runs and block legitimate
+              // releases. Resolve via the tag ref instead.
+              const tagName = context.payload.release.tag_name;
+              try {
+                const { data: ref } = await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${tagName}`
+                });
+                // Lightweight tags return commit directly; annotated tags need deref
+                if (ref.object.type === 'commit') {
+                  headSha = ref.object.sha;
+                } else {
+                  const { data: tag } = await github.rest.git.getTag({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    tag_sha: ref.object.sha
+                  });
+                  headSha = tag.object.sha;
+                }
+              } catch (err) {
+                console.log(`Could not resolve tag ${tagName} via API, falling back to context.sha`);
+                headSha = context.sha;
+              }
+              console.log(`Triggered by release (tag: ${tagName})`);
+            } else if (context.eventName === 'workflow_dispatch') {
+              headSha = context.sha;
+              console.log(`Triggered by workflow_dispatch on ref: ${context.ref}`);
+            } else {
+              throw new Error(`Unsupported trigger: ${context.eventName}`);
+            }
+            console.log(`Gating on commit: ${headSha}`);
             
             // Required workflows that must succeed
             const requiredWorkflows = ['Checks', 'macOS Test', 'Security Scan'];
@@ -132,13 +167,9 @@ jobs:
     name: Create Release Package
     runs-on: ubuntu-latest
     needs: [check-workflows]
-    # Only run if all workflows succeeded or if triggered manually/release
-    if: |
-      always() && (
-        (github.event_name == 'workflow_run' && needs.check-workflows.outputs.all-success == 'true') ||
-        github.event_name == 'release' ||
-        github.event_name == 'workflow_dispatch'
-      )
+    # Gate on check-workflows for every trigger. A failing or skipped check
+    # blocks release artifact publication (closes a supply-chain bypass).
+    if: needs.check-workflows.outputs.all-success == 'true'
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@v2
@@ -173,51 +204,29 @@ jobs:
         id: package
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          PACKAGE_NAME="MacOS-Dev-Setup-${VERSION}"
-          mkdir -p "$PACKAGE_NAME"
-          
-          # Copy all files and directories except .git, .github/workflows, and build artifacts
-          find . -mindepth 1 -maxdepth 1 \
-            ! -name '.git' \
-            ! -name '.github' \
-            ! -name "$PACKAGE_NAME" \
-            ! -name '*.zip' \
-            ! -name '*.sha256' \
-            ! -name '.DS_Store' \
-            ! -name '__MACOSX' \
-            ! -name '._*' \
-            -exec cp -r {} "$PACKAGE_NAME/" \;
-          
-          # Copy .github directory but exclude workflows subdirectory
-          if [ -d ".github" ]; then
-            mkdir -p "$PACKAGE_NAME/.github"
-            find .github -mindepth 1 -maxdepth 1 ! -name 'workflows' -exec cp -r {} "$PACKAGE_NAME/.github/" \;
-          fi
-          
-          # Remove macOS system files from the package directory
-          find "$PACKAGE_NAME" -name '.DS_Store' -delete
-          find "$PACKAGE_NAME" -name '__MACOSX' -type d -exec rm -rf {} + 2>/dev/null || true
-          find "$PACKAGE_NAME" -name '._*' -delete
-          find "$PACKAGE_NAME" -name '.AppleDouble' -type d -exec rm -rf {} + 2>/dev/null || true
-          find "$PACKAGE_NAME" -name '.LSOverride' -delete
-          
-          # Create zip file (exclude system files and build artifacts)
-          cd "$PACKAGE_NAME"
-          zip -r "../${PACKAGE_NAME}.zip" . \
-            -x "*.git*" \
-            -x "*.DS_Store" \
-            -x "*__MACOSX*" \
-            -x "*._*" \
-            -x "*.AppleDouble*" \
-            -x "*__pycache__*" \
-            -x "*.pyc" \
-            -x "*.pyo" \
-            -x "*.swp" \
-            -x "*.swo" \
-            -x "*~"
-          cd ..
-          
-          # Create checksums
+          PACKAGE_NAME="macsmith-${VERSION}"
+
+          # Use `git archive` so release packaging respects .gitattributes
+          # export-ignore rules (single source of truth for what ships).
+          # --worktree-attributes reads .gitattributes from the working tree
+          # rather than the committed version, so a PR bumping the rules
+          # takes effect immediately.
+          git archive \
+            --format=tar \
+            --worktree-attributes \
+            --prefix="${PACKAGE_NAME}/" \
+            HEAD \
+            | tar -x
+
+          # Write the resolved version into the package so install.sh can read
+          # it without .git or API calls (avoids the "installing an older zip
+          # but reporting latest release" version-drift bug).
+          printf '%s\n' "$VERSION" > "$PACKAGE_NAME/VERSION"
+
+          # Create zip (git archive gave us a clean directory; no extra excludes needed)
+          (cd "$PACKAGE_NAME" && zip -qr "../${PACKAGE_NAME}.zip" .)
+
+          # Create checksum
           sha256sum "${PACKAGE_NAME}.zip" > "${PACKAGE_NAME}.zip.sha256"
           
           # Set outputs
@@ -236,7 +245,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.version }}
           name: Release ${{ steps.version.outputs.version }}
           body: |
-            ## macOS Development Environment Setup ${{ steps.version.outputs.version }}
+            ## macsmith ${{ steps.version.outputs.version }}
             
             ### Installation
             1. Download and extract the zip file
@@ -244,20 +253,20 @@ jobs:
             3. (Optional) Run `./dev-tools.sh` to install package managers and language tools
             
             ### Files included
-            All project files are included in this release except GitHub workflow files (`.github/workflows/`).
-            
+            Packaged with `git archive` respecting `.gitattributes` `export-ignore` rules.
+            Excluded from the release zip: `.github/`, `.vscode/`, `.claude/`, `.gitignore`, `.gitattributes`, `quick-test.sh`, `CLAUDE.md`.
+
             Main files:
-            - `install.sh` - Shell setup installation script
-            - `dev-tools.sh` - Development tools installation script (language package managers, version managers, and language runtimes)
-            - `zsh.sh` - Zsh configuration
-            - `maintain-system.sh` - System maintenance script
-            - `scripts/` - Additional maintenance scripts
-            - `background/` - Terminal background images
-            - `README.md` - Documentation
-            - `LICENSE` - License file
-            - `Ghostty config.txt` - Terminal configuration
-            - `quick-test.sh` - Quick test script
-            - And all other project files
+            - `install.sh` — Shell setup installation script
+            - `dev-tools.sh` — Language tools installer (pyenv, nvm, chruby, rustup, swiftly, uv, bun, pnpm, deno, …)
+            - `bootstrap.sh` — One-liner bootstrap (clones + runs install.sh)
+            - `zsh.sh` — Zsh configuration installed as `~/.zshrc`
+            - `macsmith.sh` — The maintenance binary (becomes `~/.local/bin/macsmith`)
+            - `config/starship.toml` — Default Starship prompt config
+            - `scripts/` — Nix maintenance helper
+            - `background/` — Terminal background images (referenced by Ghostty config)
+            - `README.md`, `LICENSE`, `Ghostty config.txt`
+            - `VERSION` — Injected by the release pipeline so `install.sh` knows what it is
             
             ### Checksums
             ```

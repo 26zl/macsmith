@@ -35,7 +35,7 @@ jobs:
             "install.sh"
             "dev-tools.sh"
             "zsh.sh"
-            "maintain-system.sh"
+            "macsmith.sh"
             "scripts/nix-macos-maintenance.sh"
             "quick-test.sh"
           )
@@ -60,7 +60,7 @@ jobs:
           # Check file permissions
           echo ""
           echo "=== Checking file permissions ==="
-          chmod +x install.sh dev-tools.sh maintain-system.sh zsh.sh quick-test.sh 2>/dev/null || true
+          chmod +x install.sh dev-tools.sh macsmith.sh zsh.sh quick-test.sh 2>/dev/null || true
           chmod +x scripts/nix-macos-maintenance.sh 2>/dev/null || true
           
           # Test syntax
@@ -69,7 +69,7 @@ jobs:
           zsh -n install.sh && echo "install.sh syntax OK" || { echo "install.sh syntax error"; exit 1; }
           zsh -n dev-tools.sh && echo "dev-tools.sh syntax OK" || { echo "dev-tools.sh syntax error"; exit 1; }
           zsh -n zsh.sh && echo "zsh.sh syntax OK" || { echo "zsh.sh syntax error"; exit 1; }
-          zsh -n maintain-system.sh && echo "maintain-system.sh syntax OK" || { echo "maintain-system.sh syntax error"; exit 1; }
+          zsh -n macsmith.sh && echo "macsmith.sh syntax OK" || { echo "macsmith.sh syntax error"; exit 1; }
           zsh -n quick-test.sh && echo "quick-test.sh syntax OK" || { echo "quick-test.sh syntax error"; exit 1; }
           bash -n scripts/nix-macos-maintenance.sh && echo "nix-macos-maintenance.sh syntax OK" || { echo "nix-macos-maintenance.sh syntax error"; exit 1; }
           
@@ -117,7 +117,7 @@ jobs:
           echo "HOME=$HOME"
           echo "XDG_DATA_HOME=${XDG_DATA_HOME:-not set}"
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-          chmod +x install.sh maintain-system.sh zsh.sh 2>/dev/null || true
+          chmod +x install.sh macsmith.sh zsh.sh 2>/dev/null || true
 
           # NONINTERACTIVE=1 makes _ask_user auto-answer "yes" without stdin pipe
           # This avoids "y" spam from yes command leaking into brew/other subprocesses
@@ -129,9 +129,8 @@ jobs:
           elif [[ -d /usr/local/Homebrew ]]; then
             export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
           fi
-          # Add ~/.local/bin for maintain-system
-          local_bin="${XDG_DATA_HOME:-$HOME/.local/share}/../bin"
-          [[ -d "$local_bin" ]] || local_bin="$HOME/.local/bin"
+          # Add ~/.local/bin for macsmith
+          local_bin="$HOME/.local/bin"
           case ":$PATH:" in
             *":$local_bin:"*) ;;
             *) export PATH="$local_bin:$PATH" ;;
@@ -227,26 +226,26 @@ jobs:
           [[ -f "$HOME/.zshrc" ]] || { echo "Missing ~/.zshrc"; exit 1; }
           [[ -f "$HOME/.zprofile" ]] || { echo "Missing ~/.zprofile"; exit 1; }
           
-          # Check for maintain-system in both possible locations
-          local_bin_1="$HOME/.local/bin/maintain-system"
+          # Check for macsmith in both possible locations
+          local_bin_1="$HOME/.local/bin/macsmith"
           local_bin_2=""
           if [[ -n "${XDG_DATA_HOME:-}" ]]; then
-            local_bin_2="${XDG_DATA_HOME}/../bin/maintain-system"
+            local_bin_2="${XDG_DATA_HOME}/../bin/macsmith"
           fi
           
           if [[ -x "$local_bin_1" ]]; then
-            echo "maintain-system found at $local_bin_1"
+            echo "macsmith found at $local_bin_1"
           elif [[ -n "$local_bin_2" && -x "$local_bin_2" ]]; then
-            echo "maintain-system found at $local_bin_2"
+            echo "macsmith found at $local_bin_2"
           else
-            echo "Missing maintain-system binary"
+            echo "Missing macsmith binary"
             echo "   Checked: $local_bin_1"
             [[ -n "$local_bin_2" ]] && echo "   Checked: $local_bin_2"
-            find "$HOME" -name "maintain-system" -type f 2>/dev/null || true
+            find "$HOME" -name "macsmith" -type f 2>/dev/null || true
             exit 1
           fi
           
-          [[ -d "$HOME/.oh-my-zsh/custom/themes/powerlevel10k" ]] || { echo "Missing Powerlevel10k"; exit 1; }
+          command -v starship >/dev/null 2>&1 || { echo 'Missing Starship prompt (install with: brew install starship)'; exit 1; }
           [[ -d "$HOME/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting" ]] || { echo "Missing zsh-syntax-highlighting"; exit 1; }
           [[ -d "$HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" ]] || { echo "Missing zsh-autosuggestions"; exit 1; }
           
@@ -261,9 +260,10 @@ jobs:
             exit 1
           fi
           grep -q "FINAL PATH CLEANUP (FOR .ZPROFILE)" "$HOME/.zprofile" || { echo "Missing PATH cleanup block in ~/.zprofile"; exit 1; }
-          grep -q "maintain_system_bin" "$HOME/.zshrc" || { echo "Missing maintain_system_bin in ~/.zshrc"; exit 1; }
+          grep -q "macsmith_bin" "$HOME/.zshrc" || { echo "Missing macsmith_bin in ~/.zshrc"; exit 1; }
           grep -q "alias update=" "$HOME/.zshrc" && echo "update alias definition found in ~/.zshrc" || echo "update alias definition not found (may be conditional)"
-          grep -q "powerlevel10k/powerlevel10k" "$HOME/.zshrc" || { echo "Missing Powerlevel10k theme in ~/.zshrc"; exit 1; }
+          grep -q 'starship init zsh' "$HOME/.zshrc" || { echo "Missing Starship init line in ~/.zshrc"; exit 1; }
+          grep -q 'ZSH_THEME=""' "$HOME/.zshrc" || { echo "Expected empty ZSH_THEME in ~/.zshrc (Starship takes over)"; exit 1; }
           grep -q "oh-my-zsh.sh" "$HOME/.zshrc" || { echo "Missing Oh My Zsh source line in ~/.zshrc"; exit 1; }
           
           # Test that install.sh functions exist
@@ -316,16 +316,16 @@ jobs:
           
           # Validate PATH and tools in login shell
           echo "Validating PATH and tools via login shell..."
-          zsh -lc 'command -v maintain-system >/dev/null' || { echo "maintain-system not in PATH"; exit 1; }
+          zsh -lc 'command -v macsmith >/dev/null' || { echo "macsmith not in PATH"; exit 1; }
           zsh -lc 'command -v git >/dev/null' || { echo "git not available in login shell"; exit 1; }
           zsh -lc 'command -v brew >/dev/null' || { echo "Homebrew not available in login shell"; exit 1; }
           zsh -lc 'command -v fzf >/dev/null' || { echo "fzf not available in login shell"; exit 1; }
           zsh -lc '
-            ms_path=$(command -v maintain-system 2>/dev/null || true)
+            ms_path=$(command -v macsmith 2>/dev/null || true)
             [[ -n "$ms_path" ]]
             ms_dir=${ms_path:h}
             case ":$PATH:" in *":$ms_dir:"*) exit 0 ;; *) exit 1 ;; esac
-          ' || { echo "PATH missing maintain-system directory"; exit 1; }
+          ' || { echo "PATH missing macsmith directory"; exit 1; }
           
           # Check Homebrew PATH with better error reporting
           zsh -lc '
@@ -380,17 +380,17 @@ jobs:
             exit 1
           fi
           
-          if grep -q "maintain_system_bin" "$HOME/.zshrc"; then
-            echo "maintain_system_bin is defined in ~/.zshrc"
+          if grep -q "macsmith_bin" "$HOME/.zshrc"; then
+            echo "macsmith_bin is defined in ~/.zshrc"
           else
-            echo "maintain_system_bin missing in ~/.zshrc"
+            echo "macsmith_bin missing in ~/.zshrc"
             exit 1
           fi
           
-          if zsh -lc 'command -v maintain-system >/dev/null'; then
-            echo "maintain-system is available in PATH"
+          if zsh -lc 'command -v macsmith >/dev/null'; then
+            echo "macsmith is available in PATH"
           else
-            echo "maintain-system not available in PATH"
+            echo "macsmith not available in PATH"
             exit 1
           fi
           
@@ -403,7 +403,7 @@ jobs:
 
           # Test help/usage command
           echo "Testing help/usage output..."
-          zsh -lc 'maintain-system --help 2>&1 || maintain-system help 2>&1 || maintain-system 2>&1' | tee help_output.txt
+          zsh -lc 'macsmith --help 2>&1 || macsmith help 2>&1 || macsmith 2>&1' | tee help_output.txt
 
           if grep -qE "update|verify|versions" help_output.txt; then
             echo "help output shows available commands"
@@ -413,7 +413,7 @@ jobs:
             exit 1
           fi
 
-          if grep -qE "MAINTAIN_SYSTEM_.*=" help_output.txt; then
+          if grep -qE "MACSMITH_.*=" help_output.txt; then
             echo "help output shows environment variables"
           else
             echo "WARNING: help output may not show environment variables"
@@ -422,7 +422,7 @@ jobs:
           # Test invalid command
           echo ""
           echo "Testing invalid command handling..."
-          if zsh -lc 'maintain-system invalid-command 2>&1' | grep -qE "Usage:|update|verify|versions"; then
+          if zsh -lc 'macsmith invalid-command 2>&1' | grep -qE "Usage:|update|verify|versions"; then
             echo "Invalid command shows usage information"
           else
             echo "WARNING: Invalid command may not show usage"
@@ -431,7 +431,7 @@ jobs:
           # Test verify command
           echo ""
           echo "Testing verify command output..."
-          zsh -lc 'maintain-system verify' 2>&1 | tee verify_output.txt
+          zsh -lc 'macsmith verify' 2>&1 | tee verify_output.txt
           
           if grep -qE "^[A-Za-z][A-Za-z0-9_-]*[[:space:]]+(OK|WARN|Not installed)" verify_output.txt; then
             echo "verify output has correct format"
@@ -462,7 +462,7 @@ jobs:
           # Test versions command
           echo ""
           echo "Testing versions command output..."
-          zsh -lc 'maintain-system versions' 2>&1 | tee versions_output.txt
+          zsh -lc 'macsmith versions' 2>&1 | tee versions_output.txt
           
           if grep -qE "^[A-Za-z][A-Za-z0-9_-]*[[:space:]]+\." versions_output.txt || grep -q "TOOL VERSIONS" versions_output.txt; then
             echo "versions output has correct format"
@@ -494,7 +494,7 @@ jobs:
           echo ""
           echo "Testing error handling for missing tools..."
           zsh -lc '
-            output=$(maintain-system verify 2>&1)
+            output=$(macsmith verify 2>&1)
             
             if echo "$output" | grep -qE "Not found - skipping.*install\.sh|Not installed.*dev-tools\.sh"; then
               echo "Script handles missing tools gracefully (shows skip messages with correct script references)"
@@ -502,7 +502,7 @@ jobs:
               echo "No missing tools detected (this is OK if all tools are installed)"
             fi
             
-            if maintain-system verify >/dev/null 2>&1; then
+            if macsmith verify >/dev/null 2>&1; then
               echo "Script handles missing package managers gracefully"
             else
               echo "Script failed on missing package managers"
@@ -517,15 +517,15 @@ jobs:
         run: |
           echo "=== Package Manager Testing ==="
           
-          # Test that maintain-system.sh skips missing tools and refers to correct scripts
+          # Test that macsmith.sh skips missing tools and refers to correct scripts
           echo ""
-          echo "Testing maintain-system.sh skip behavior..."
+          echo "Testing macsmith.sh skip behavior..."
           zsh -lc '
-            output=$(maintain-system verify 2>&1)
+            output=$(macsmith verify 2>&1)
             
             # Check for skip messages with install alias references for system package managers
-            if echo "$output" | grep -qE "Not found - skipping" && echo "$output" | grep -qE "To install.*run: '\''install'\''"; then
-              echo "OK: maintain-system.sh correctly skips missing system package managers and refers to install"
+            if echo "$output" | grep -qE "Not found - skipping" && echo "$output" | grep -qE "To install.*run: '\''sys-install'\''"; then
+              echo "OK: macsmith.sh correctly skips missing system package managers and refers to install"
             else
               echo "WARNING: Skip messages with install references not found for system package managers"
               echo "This may be OK if all system package managers are installed"
@@ -533,7 +533,7 @@ jobs:
 
             # Check for skip messages with dev-tools alias references for language tools
             if echo "$output" | grep -qE "Not installed" && echo "$output" | grep -qE "To install.*run: '\''dev-tools'\''"; then
-              echo "OK: maintain-system.sh correctly refers to dev-tools for language tools"
+              echo "OK: macsmith.sh correctly refers to dev-tools for language tools"
             else
               echo "WARNING: Skip messages with dev-tools references not found for language tools"
               echo "This may be OK if all language tools are installed"
@@ -544,10 +544,10 @@ jobs:
           echo ""
           echo "Testing mas update/upgrade functionality..."
           if command -v mas >/dev/null 2>&1; then
-            if grep -qE "mas upgrade.*mas update" maintain-system.sh && ! grep -q "sudo mas upgrade" maintain-system.sh; then
-              echo "OK: mas upgrade and update commands found in maintain-system.sh (without sudo)"
+            if grep -qE "mas upgrade.*mas update" macsmith.sh && ! grep -q "sudo mas upgrade" macsmith.sh; then
+              echo "OK: mas upgrade and update commands found in macsmith.sh (without sudo)"
             else
-              echo "WARNING: mas upgrade/update commands may not be correct in maintain-system.sh"
+              echo "WARNING: mas upgrade/update commands may not be correct in macsmith.sh"
             fi
             
             # Test that mas actually works
@@ -563,85 +563,85 @@ jobs:
           
           # Test Homebrew skip behavior (should refer to install alias)
           echo ""
-          echo "Testing Homebrew skip behavior in maintain-system.sh..."
-          if grep -qE "Not found - skipping" maintain-system.sh && grep -qE "To install Homebrew.*run: 'install'" maintain-system.sh; then
+          echo "Testing Homebrew skip behavior in macsmith.sh..."
+          if grep -qE "Not found - skipping" macsmith.sh && grep -qE "To install Homebrew.*run: 'sys-install'" macsmith.sh; then
             echo "OK: Homebrew skip message with install reference found"
           else
-            echo "WARNING: Homebrew skip message not found in maintain-system.sh"
+            echo "ERROR: Homebrew skip message (run: 'sys-install') not found in macsmith.sh"; exit 1
           fi
 
           # Test MacPorts skip behavior (should refer to install alias)
           echo ""
-          echo "Testing MacPorts skip behavior in maintain-system.sh..."
-          if grep -qE "Not found - skipping" maintain-system.sh && grep -qE "To install MacPorts.*run: 'install'" maintain-system.sh; then
+          echo "Testing MacPorts skip behavior in macsmith.sh..."
+          if grep -qE "Not found - skipping" macsmith.sh && grep -qE "To install MacPorts.*run: 'sys-install'" macsmith.sh; then
             echo "OK: MacPorts skip message with install reference found"
           else
-            echo "WARNING: MacPorts skip message not found in maintain-system.sh"
+            echo "ERROR: MacPorts skip message (run: 'sys-install') not found in macsmith.sh"; exit 1
           fi
 
           # Test mas skip behavior (should refer to install alias)
           echo ""
-          echo "Testing mas skip behavior in maintain-system.sh..."
-          if grep -qE "Not found - skipping" maintain-system.sh && grep -qE "To install mas.*run: 'install'" maintain-system.sh; then
+          echo "Testing mas skip behavior in macsmith.sh..."
+          if grep -qE "Not found - skipping" macsmith.sh && grep -qE "To install mas.*run: 'sys-install'" macsmith.sh; then
             echo "OK: mas skip message with install reference found"
           else
-            echo "WARNING: mas skip message not found in maintain-system.sh"
+            echo "ERROR: mas skip message (run: 'sys-install') not found in macsmith.sh"; exit 1
           fi
 
           # Test Nix skip behavior (should refer to install alias)
           echo ""
-          echo "Testing Nix skip behavior in maintain-system.sh..."
-          if grep -qE "Not found - skipping" maintain-system.sh && grep -qE "To install Nix.*run: 'install'" maintain-system.sh; then
+          echo "Testing Nix skip behavior in macsmith.sh..."
+          if grep -qE "Not found - skipping" macsmith.sh && grep -qE "To install Nix.*run: 'sys-install'" macsmith.sh; then
             echo "OK: Nix skip message with install reference found"
           else
-            echo "WARNING: Nix skip message not found in maintain-system.sh"
+            echo "ERROR: Nix skip message (run: 'sys-install') not found in macsmith.sh"; exit 1
           fi
 
           # Test language tools skip behavior (should refer to dev-tools alias)
           echo ""
-          echo "Testing language tools skip behavior in maintain-system.sh..."
-          if grep -qE "To install.*run: 'dev-tools'" maintain-system.sh; then
+          echo "Testing language tools skip behavior in macsmith.sh..."
+          if grep -qE "To install.*run: 'dev-tools'" macsmith.sh; then
             echo "OK: Language tools skip messages with dev-tools reference found"
           else
             echo "WARNING: Language tools skip messages with dev-tools reference not found"
           fi
           
-          # Test that installed package managers actually work with maintain-system
+          # Test that installed package managers actually work with macsmith
           echo ""
-          echo "=== Testing installed package managers with maintain-system ==="
+          echo "=== Testing installed package managers with macsmith ==="
           zsh -lc '
             # Test verify command with installed package managers
-            verify_output=$(maintain-system verify 2>&1)
+            verify_output=$(macsmith verify 2>&1)
             
             if command -v brew >/dev/null 2>&1; then
               if echo "$verify_output" | grep -qi "Homebrew.*OK\|Homebrew found"; then
-                echo "OK: maintain-system correctly detects Homebrew"
+                echo "OK: macsmith correctly detects Homebrew"
               else
-                echo "WARNING: maintain-system may not detect Homebrew correctly"
+                echo "WARNING: macsmith may not detect Homebrew correctly"
               fi
             fi
             
             if command -v mas >/dev/null 2>&1; then
               if echo "$verify_output" | grep -qi "mas.*OK\|mas found"; then
-                echo "OK: maintain-system correctly detects mas"
+                echo "OK: macsmith correctly detects mas"
               else
-                echo "WARNING: maintain-system may not detect mas correctly"
+                echo "WARNING: macsmith may not detect mas correctly"
               fi
             fi
             
             if command -v port >/dev/null 2>&1; then
               if echo "$verify_output" | grep -qi "MacPorts.*OK\|MacPorts found"; then
-                echo "OK: maintain-system correctly detects MacPorts"
+                echo "OK: macsmith correctly detects MacPorts"
               else
-                echo "WARNING: maintain-system may not detect MacPorts correctly"
+                echo "WARNING: macsmith may not detect MacPorts correctly"
               fi
             fi
             
             if command -v nix >/dev/null 2>&1 || [[ -f /nix/var/nix/profiles/default/bin/nix ]]; then
               if echo "$verify_output" | grep -qi "Nix.*OK\|Nix found"; then
-                echo "OK: maintain-system correctly detects Nix"
+                echo "OK: macsmith correctly detects Nix"
               else
-                echo "WARNING: maintain-system may not detect Nix correctly"
+                echo "WARNING: macsmith may not detect Nix correctly"
               fi
             fi
           ' || exit 1
@@ -651,9 +651,9 @@ jobs:
 
       - name: Feature testing
         env:
-          MAINTAIN_SYSTEM_CLEAN_PYENV: "0"
-          MAINTAIN_SYSTEM_CLEAN_NVM: "0"
-          MAINTAIN_SYSTEM_SWIFT_SNAPSHOTS: "1"
+          MACSMITH_CLEAN_PYENV: "0"
+          MACSMITH_CLEAN_NVM: "0"
+          MACSMITH_SWIFT_SNAPSHOTS: "1"
         run: |
           echo "=== Feature Testing ==="
           
@@ -667,7 +667,7 @@ jobs:
           import tempfile
           from pathlib import Path
 
-          cmd = ["zsh", "-lc", "maintain-system update"]
+          cmd = ["zsh", "-lc", "macsmith update"]
           try:
               result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=1800)
               output = result.stdout
@@ -815,61 +815,61 @@ jobs:
             fi
 
             if grep -qi "pyenv.*cleanup disabled" update_output.txt; then
-              echo "MAINTAIN_SYSTEM_CLEAN_PYENV=0 works"
+              echo "MACSMITH_CLEAN_PYENV=0 works"
             else
-              echo "MAINTAIN_SYSTEM_CLEAN_PYENV=0 test inconclusive (may be OK if pyenv not installed)"
+              echo "MACSMITH_CLEAN_PYENV=0 test inconclusive (may be OK if pyenv not installed)"
             fi
 
             if grep -qi "nvm.*cleanup disabled" update_output.txt; then
-              echo "MAINTAIN_SYSTEM_CLEAN_NVM=0 works"
+              echo "MACSMITH_CLEAN_NVM=0 works"
             else
-              echo "MAINTAIN_SYSTEM_CLEAN_NVM=0 test inconclusive (may be OK if nvm not installed)"
+              echo "MACSMITH_CLEAN_NVM=0 test inconclusive (may be OK if nvm not installed)"
             fi
 
-            echo "MAINTAIN_SYSTEM_SWIFT_SNAPSHOTS=1 set (will be used if swiftly is installed)"
+            echo "MACSMITH_SWIFT_SNAPSHOTS=1 set (will be used if swiftly is installed)"
           ' || exit 1
 
           # Test additional environment variables
           echo ""
           echo "Testing additional environment variables..."
           zsh -lc '
-            # Test MAINTAIN_SYSTEM_FIX_RUBY_GEMS
-            export MAINTAIN_SYSTEM_FIX_RUBY_GEMS=0
-            output=$(maintain-system verify 2>&1 || true)
+            # Test MACSMITH_FIX_RUBY_GEMS
+            export MACSMITH_FIX_RUBY_GEMS=0
+            output=$(macsmith verify 2>&1 || true)
             if echo "$output" | grep -qi "ruby.*gems.*disabled\|skip.*ruby.*fix"; then
-              echo "MAINTAIN_SYSTEM_FIX_RUBY_GEMS=0 works"
+              echo "MACSMITH_FIX_RUBY_GEMS=0 works"
             else
-              echo "MAINTAIN_SYSTEM_FIX_RUBY_GEMS=0 test inconclusive (may be OK if Ruby not installed or no gems issues)"
+              echo "MACSMITH_FIX_RUBY_GEMS=0 test inconclusive (may be OK if Ruby not installed or no gems issues)"
             fi
 
-            # Test MAINTAIN_SYSTEM_CLEAN_CHRUBY
-            export MAINTAIN_SYSTEM_CLEAN_CHRUBY=0
-            output=$(maintain-system verify 2>&1 || true)
+            # Test MACSMITH_CLEAN_CHRUBY
+            export MACSMITH_CLEAN_CHRUBY=0
+            output=$(macsmith verify 2>&1 || true)
             if echo "$output" | grep -qi "chruby.*cleanup disabled"; then
-              echo "MAINTAIN_SYSTEM_CLEAN_CHRUBY=0 works"
+              echo "MACSMITH_CLEAN_CHRUBY=0 works"
             else
-              echo "MAINTAIN_SYSTEM_CLEAN_CHRUBY=0 test inconclusive (may be OK if chruby not installed)"
+              echo "MACSMITH_CLEAN_CHRUBY=0 test inconclusive (may be OK if chruby not installed)"
             fi
 
-            # Test MAINTAIN_SYSTEM_PYENV_KEEP
-            export MAINTAIN_SYSTEM_PYENV_KEEP="3.9.0 3.10.0"
-            export MAINTAIN_SYSTEM_CLEAN_PYENV=1
-            if maintain-system verify 2>&1 | grep -qi "pyenv"; then
-              echo "MAINTAIN_SYSTEM_PYENV_KEEP environment variable set (will preserve versions if cleanup runs)"
+            # Test MACSMITH_PYENV_KEEP
+            export MACSMITH_PYENV_KEEP="3.9.0 3.10.0"
+            export MACSMITH_CLEAN_PYENV=1
+            if macsmith verify 2>&1 | grep -qi "pyenv"; then
+              echo "MACSMITH_PYENV_KEEP environment variable set (will preserve versions if cleanup runs)"
             fi
 
-            # Test MAINTAIN_SYSTEM_NVM_KEEP
-            export MAINTAIN_SYSTEM_NVM_KEEP="16.0.0 18.0.0"
-            export MAINTAIN_SYSTEM_CLEAN_NVM=1
-            if maintain-system verify 2>&1 | grep -qi "nvm\|node"; then
-              echo "MAINTAIN_SYSTEM_NVM_KEEP environment variable set (will preserve versions if cleanup runs)"
+            # Test MACSMITH_NVM_KEEP
+            export MACSMITH_NVM_KEEP="16.0.0 18.0.0"
+            export MACSMITH_CLEAN_NVM=1
+            if macsmith verify 2>&1 | grep -qi "nvm\|node"; then
+              echo "MACSMITH_NVM_KEEP environment variable set (will preserve versions if cleanup runs)"
             fi
 
-            # Test MAINTAIN_SYSTEM_CHRUBY_KEEP
-            export MAINTAIN_SYSTEM_CHRUBY_KEEP="3.0.0 3.1.0"
-            export MAINTAIN_SYSTEM_CLEAN_CHRUBY=1
-            if maintain-system verify 2>&1 | grep -qi "chruby\|ruby"; then
-              echo "MAINTAIN_SYSTEM_CHRUBY_KEEP environment variable set (will preserve versions if cleanup runs)"
+            # Test MACSMITH_CHRUBY_KEEP
+            export MACSMITH_CHRUBY_KEEP="3.0.0 3.1.0"
+            export MACSMITH_CLEAN_CHRUBY=1
+            if macsmith verify 2>&1 | grep -qi "chruby\|ruby"; then
+              echo "MACSMITH_CHRUBY_KEEP environment variable set (will preserve versions if cleanup runs)"
             fi
           ' || exit 1
           
@@ -879,7 +879,7 @@ jobs:
           zsh -lc '
             if command -v go >/dev/null 2>&1; then
               echo "Go is installed"
-              if grep -q "Managed by macOS Development Environment Setup - Go configuration" "$HOME/.zprofile" 2>/dev/null; then
+              if grep -q "Managed by macsmith - Go configuration" "$HOME/.zprofile" 2>/dev/null; then
                 echo "Go configuration marker found in .zprofile"
               else
                 echo "Go configuration marker not found (may be OK if Go was not updated)"
@@ -896,10 +896,10 @@ jobs:
           
           # Test Homebrew auto-install skip behavior (should refer to install alias)
           echo ""
-          echo "Testing Homebrew skip behavior in maintain-system.sh..."
+          echo "Testing Homebrew skip behavior in macsmith.sh..."
           zsh -lc '
-            if grep -q "Not found - skipping\|To install Homebrew.*run: '\''install'\''" "$(command -v maintain-system)" 2>/dev/null; then
-              echo "OK: Homebrew skip logic with install reference detected in maintain-system.sh"
+            if grep -q "Not found - skipping\|To install Homebrew.*run: '\''sys-install'\''" "$(command -v macsmith)" 2>/dev/null; then
+              echo "OK: Homebrew skip logic with install reference detected in macsmith.sh"
             else
               echo "WARNING: Homebrew skip logic not found (may be OK if Homebrew is always present)"
             fi
@@ -963,7 +963,7 @@ jobs:
           zsh -lc '
             if command -v swiftly >/dev/null 2>&1; then
               echo "swiftly is installed"
-              output=$(maintain-system verify 2>&1 | grep -i "swift" || true)
+              output=$(macsmith verify 2>&1 | grep -i "swift" || true)
               if echo "$output" | grep -qi "swift"; then
                 echo "Swift is detected in verify"
               else
@@ -1142,7 +1142,7 @@ jobs:
           echo "Testing missing dependencies handling..."
           zsh -lc '
             # Test that scripts handle missing tools gracefully
-            output=$(maintain-system verify 2>&1 || true)
+            output=$(macsmith verify 2>&1 || true)
 
             # Check for graceful handling of missing tools
             if echo "$output" | grep -qE "Not installed|Not found|skipping"; then
@@ -1152,10 +1152,10 @@ jobs:
             fi
 
             # Verify exit codes are reasonable
-            if maintain-system verify >/dev/null 2>&1; then
-              echo "maintain-system verify exits successfully even with missing tools"
+            if macsmith verify >/dev/null 2>&1; then
+              echo "macsmith verify exits successfully even with missing tools"
             else
-              echo "WARNING: maintain-system verify may exit with error on missing tools"
+              echo "WARNING: macsmith verify may exit with error on missing tools"
             fi
           ' || exit 1
 
@@ -1176,11 +1176,11 @@ jobs:
               exit 1
             fi
 
-            # Check that maintain-system is in PATH for both
-            if zsh -lc "command -v maintain-system" >/dev/null && zsh -ic "command -v maintain-system" >/dev/null; then
-              echo "maintain-system available in both shell types"
+            # Check that macsmith is in PATH for both
+            if zsh -lc "command -v macsmith" >/dev/null && zsh -ic "command -v macsmith" >/dev/null; then
+              echo "macsmith available in both shell types"
             else
-              echo "ERROR: maintain-system not available in all shell types"
+              echo "ERROR: macsmith not available in all shell types"
               exit 1
             fi
           ' || exit 1
@@ -1208,7 +1208,7 @@ jobs:
             fi
 
             # Verify quick-test checks important things
-            if grep -qE "zshrc|zprofile|oh-my-zsh|maintain-system" quick_test_output.txt; then
+            if grep -qE "zshrc|zprofile|oh-my-zsh|macsmith" quick_test_output.txt; then
               echo "quick-test.sh checks essential components"
             else
               echo "WARNING: quick-test.sh may not check essential components"
@@ -1247,10 +1247,10 @@ jobs:
               exit 1
             fi
 
-            if grep -q "powerlevel10k" zsh.sh; then
-              echo "zsh.sh contains Powerlevel10k configuration"
+            if grep -q "starship init zsh" zsh.sh; then
+              echo "zsh.sh contains Starship init"
             else
-              echo "ERROR: zsh.sh missing Powerlevel10k configuration"
+              echo "ERROR: zsh.sh missing Starship init"
               exit 1
             fi
 
@@ -1261,11 +1261,11 @@ jobs:
               exit 1
             fi
 
-            # Verify maintain-system alias is configured
-            if grep -qE "alias update=|maintain_system_bin" zsh.sh; then
-              echo "zsh.sh contains maintain-system alias configuration"
+            # Verify macsmith alias is configured
+            if grep -qE "alias update=|macsmith_bin" zsh.sh; then
+              echo "zsh.sh contains macsmith alias configuration"
             else
-              echo "ERROR: zsh.sh missing maintain-system alias"
+              echo "ERROR: zsh.sh missing macsmith alias"
               exit 1
             fi
 
@@ -1284,7 +1284,7 @@ jobs:
           # Test all scripts for common issues
           echo ""
           echo "Testing scripts for common issues..."
-          for script in install.sh dev-tools.sh maintain-system.sh zsh.sh quick-test.sh scripts/nix-macos-maintenance.sh; do
+          for script in install.sh dev-tools.sh macsmith.sh zsh.sh quick-test.sh scripts/nix-macos-maintenance.sh; do
             if [[ -f "$script" ]]; then
               # Check for TODO/FIXME markers
               if grep -qE "TODO|FIXME|XXX" "$script"; then
@@ -1320,7 +1320,7 @@ jobs:
           echo "  - Non-interactive mode handling"
           echo "  - Shell configuration (zsh.sh structure and content)"
           echo "  - PATH management and preservation"
-          echo "  - maintain-system commands (verify, versions, update, help, invalid command)"
+          echo "  - macsmith commands (verify, versions, update, help, invalid command)"
           echo "  - nix-macos-maintenance.sh commands (status, ensure-path, update, preview-nix-upgrade, cleanup, fix-compaudit, help)"
           echo "  - Package manager skip behavior (Homebrew, MacPorts, mas, Nix)"
           echo "  - mas support and functionality"
@@ -1329,7 +1329,7 @@ jobs:
           echo "  - Nix secure installation (--proto, --tlsv1.2)"
           echo "  - MacPorts source installation"
           echo "  - System Python/Ruby protection"
-          echo "  - Environment variables (MAINTAIN_SYSTEM_CLEAN_PYENV, MAINTAIN_SYSTEM_CLEAN_NVM, MAINTAIN_SYSTEM_CLEAN_CHRUBY, MAINTAIN_SYSTEM_FIX_RUBY_GEMS, MAINTAIN_SYSTEM_SWIFT_SNAPSHOTS, *_KEEP variables)"
+          echo "  - Environment variables (MACSMITH_CLEAN_PYENV, MACSMITH_CLEAN_NVM, MACSMITH_CLEAN_CHRUBY, MACSMITH_FIX_RUBY_GEMS, MACSMITH_SWIFT_SNAPSHOTS, *_KEEP variables)"
           echo "  - Edge cases (re-running install.sh, backup creation, existing configs)"
           echo "  - Missing dependencies handling"
           echo "  - PATH preservation across shell types"

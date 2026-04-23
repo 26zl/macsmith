@@ -12,15 +12,19 @@ __MACOSX/
 Network Trash Folder
 Temporary Items
 .apdisk
+Icon\r
 
-.cursor/
+# IDE / editor state
 .vscode/
+.idea/
+.cursor/
+.claude/
+*.sublime-workspace
+*.sublime-project
+
+# Claude Code
 CLAUDE.md
 nul
-.claude/
-
-# macOS settings
-Icon\r
 
 # Python
 __pycache__/
@@ -50,17 +54,9 @@ build/
 .parcel-cache/
 coverage/
 
-# Logs
+# Logs + swap/backup files
 logs/
 *.log
-
-# IDEs and editors
-.vscode/
-.idea/
-*.sublime-workspace
-*.sublime-project
-
-# Temporary / swap files
 *.swp
 *.tmp
 *.bak
@@ -70,12 +66,12 @@ Thumbs.db
 # GitHub Actions artifacts
 *.sarif
 
-# Snyk Security Extension - AI Rules (auto-generated)
+# Snyk Security Extension — AI rules are auto-generated; keep ignored even
+# if the directories are cleaned so they don't sneak back into commits.
 .github/instructions/snyk_rules.instructions.md
-
-# Snyk Security Extension - AI Rules (auto-generated)
 .cursor/rules/snyk_rules.mdc
+*instructions/
 
+# Swiftly project-local marker (don't commit; managed by swiftly use)
 .swift-version
 .build/
-*instructions/

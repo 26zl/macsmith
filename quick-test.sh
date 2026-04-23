@@ -32,10 +32,17 @@ else
   test_failed=1
 fi
 
-if zsh -n maintain-system.sh; then
-  echo "${GREEN}✅ OK: maintain-system.sh syntax valid${NC}"
+if zsh -n macsmith.sh; then
+  echo "${GREEN}✅ OK: macsmith.sh syntax valid${NC}"
 else
-  echo "FAIL: maintain-system.sh syntax error"
+  echo "FAIL: macsmith.sh syntax error"
+  test_failed=1
+fi
+
+if zsh -n bootstrap.sh; then
+  echo "${GREEN}✅ OK: bootstrap.sh syntax valid${NC}"
+else
+  echo "FAIL: bootstrap.sh syntax error"
   test_failed=1
 fi
 
@@ -69,43 +76,47 @@ else
   test_failed=1
 fi
 
-if [[ -f maintain-system.sh ]]; then
-  echo "${GREEN}✅ OK: maintain-system.sh exists${NC}"
+if [[ -f macsmith.sh ]]; then
+  echo "${GREEN}✅ OK: macsmith.sh exists${NC}"
 else
-  echo "FAIL: maintain-system.sh missing"
+  echo "FAIL: macsmith.sh missing"
   test_failed=1
 fi
 
 echo ""
-echo "3. Testing maintain-system script..."
-get_maintain_system_path() {
-  local local_bin="${XDG_DATA_HOME:-$HOME/.local/share}/../bin"
-  [[ -d "$local_bin" ]] || local_bin="$HOME/.local/bin"
+echo "3. Testing macsmith script..."
 
-  if [[ -x "$local_bin/maintain-system" ]]; then
-    echo "$local_bin/maintain-system"
-    return 0
-  fi
+# 3a. Test the repo's macsmith.sh with a real read-only subcommand. `versions`
+# is safe (just prints tool versions) and actually exercises code paths rather
+# than a trivial help branch, so this is a meaningful runtime smoke test.
+if zsh macsmith.sh versions >/dev/null 2>&1; then
+  echo "${GREEN}✅ OK: repo macsmith.sh runs 'versions' cleanly${NC}"
+else
+  # versions runs every detection block; a non-zero here means a real bug
+  # (not a missing tool — versions prints "not installed" rather than failing).
+  echo "FAIL: repo macsmith.sh exits non-zero on 'versions'"
+  zsh macsmith.sh versions 2>&1 | tail -10 | sed 's/^/  /'
+  test_failed=1
+fi
 
-  if command -v maintain-system >/dev/null 2>&1; then
-    command -v maintain-system
-    return 0
-  fi
-
+# 3b. If a binary is installed, verify IT also works.
+get_macsmith_path() {
+  local local_bin="$HOME/.local/bin"
+  if [[ -x "$local_bin/macsmith" ]]; then echo "$local_bin/macsmith"; return 0; fi
+  if command -v macsmith >/dev/null 2>&1; then command -v macsmith; return 0; fi
   return 1
 }
 
-maintain_system_path="$(get_maintain_system_path || true)"
-if [[ -n "$maintain_system_path" ]]; then
-  if "$maintain_system_path" versions > /dev/null 2>&1; then
-    echo "${GREEN}✅ OK: maintain-system works ($maintain_system_path)${NC}"
+macsmith_path="$(get_macsmith_path || true)"
+if [[ -n "$macsmith_path" ]]; then
+  if "$macsmith_path" versions > /dev/null 2>&1; then
+    echo "${GREEN}✅ OK: installed macsmith works ($macsmith_path)${NC}"
   else
-    echo "FAIL: maintain-system failed ($maintain_system_path)"
+    echo "FAIL: installed macsmith failed ($macsmith_path)"
     test_failed=1
   fi
 else
-  echo "WARNING: maintain-system not installed (run ./install.sh first)"
-  # This is a warning, not a failure, so don't set test_failed
+  echo "INFO: no installed macsmith binary (run ./install.sh to install; repo file already verified above)"
 fi
 
 echo ""

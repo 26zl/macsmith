@@ -1,20 +1,14 @@
 #!/usr/bin/env zsh
 
-# Enable Powerlevel10k instant prompt. Should stay close to the top of ~/.zshrc.
-# Initialization code that may require console input (password prompts, [y/n]
-# confirmations, etc.) must go above this block; everything else may go below.
-if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
-  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
-fi
+# Prompt: Starship is initialized at the end of this file, after PATH setup.
+# Oh My Zsh is used for plugins only; its theme is disabled so Starship wins.
 
 export ZSH="$HOME/.oh-my-zsh"
-export ZSH_THEME="powerlevel10k/powerlevel10k"
+export ZSH_THEME=""
 export plugins=(git zsh-syntax-highlighting zsh-autosuggestions)
 
-source "$ZSH/oh-my-zsh.sh"
-
-# To customize prompt, run `p10k configure` or edit ~/.p10k.zsh.
-[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
+# Guard against partial installs: if OMZ install failed, don't break shell startup.
+[[ -f "$ZSH/oh-my-zsh.sh" ]] && source "$ZSH/oh-my-zsh.sh"
 
 # ================================ PATH =====================================
 # Detect Homebrew installation prefix
@@ -29,6 +23,7 @@ _detect_brew_prefix() {
 }
 # Clean PATH of duplicates and prioritize Homebrew
 _clean_path() {
+  # shellcheck disable=SC2296  # ${(@s/:/)PATH} is valid zsh word-splitting
   local path_array=("${(@s/:/)PATH}")
   local unique_paths=()
   local seen_paths=()
@@ -100,6 +95,7 @@ _add_to_path() {
   normalized_new="${normalized_new%/}"
   
   # Check if path is already in PATH
+  # shellcheck disable=SC2296  # ${(@s/:/)PATH} is valid zsh word-splitting
   local path_array=("${(@s/:/)PATH}")
   for path_entry in "${path_array[@]}"; do
     [[ -z "$path_entry" ]] && continue
@@ -424,16 +420,16 @@ fi
 # ================================ UPDATE ===================================
 # Update, verify, and versions functions have been moved to a standalone script
 # to keep .zshrc lean and to improve shell startup performance.
-# Alias to the maintain-system script:
+# Alias to the macsmith script:
 # Uses XDG_DATA_HOME if set, otherwise fall back to ~/.local/bin
-maintain_system_bin="$HOME/.local/bin/maintain-system"
-if [[ -x "$maintain_system_bin" ]]; then
-  alias update="$maintain_system_bin update"
-  alias verify="$maintain_system_bin verify"
-  alias versions="$maintain_system_bin versions"
-  alias upgrade="$maintain_system_bin upgrade"
-  alias sys-install="$maintain_system_bin install"
-  alias dev-tools="$maintain_system_bin dev-tools"
+macsmith_bin="$HOME/.local/bin/macsmith"
+if [[ -x "$macsmith_bin" ]]; then
+  alias update="$macsmith_bin update"
+  alias verify="$macsmith_bin verify"
+  alias versions="$macsmith_bin versions"
+  alias upgrade="$macsmith_bin upgrade"
+  alias sys-install="$macsmith_bin install"
+  alias dev-tools="$macsmith_bin dev-tools"
 fi
 
 # ================================ Swiftly ===================================
@@ -448,61 +444,60 @@ fzf_config="${XDG_CONFIG_HOME:-$HOME/.config}/fzf/fzf.zsh"
 [[ -f "$fzf_config" ]] && source "$fzf_config"
 
 # ================================ UPDATE CHECK =============================
-# Check for macOS Dev Setup updates (async, max once per 24h)
-# Notification is deferred to first prompt via precmd hook to avoid
-# console output during zsh init (which triggers P10k instant prompt warnings)
-if [[ "${MACOS_DEV_SETUP_UPDATE_CHECK:-1}" != "0" ]]; then
-  _macos_dev_setup_data="$HOME/.local/share/macos-dev-setup"
-  # Defer notification to first prompt to avoid P10k instant prompt warning
-  if [[ -f "$_macos_dev_setup_data/version" ]] && [[ -f "$_macos_dev_setup_data/latest-remote-version" ]]; then
-    _local_ver="$(<"$_macos_dev_setup_data/version")"
-    _remote_ver="$(<"$_macos_dev_setup_data/latest-remote-version")"
+# Check for macsmith updates (async, max once per 24h).
+# Opt-in only: set MACSMITH_UPDATE_CHECK=1 to enable. Disabled by default
+# so shell startup doesn't silently call api.github.com.
+# Notification is deferred to first prompt via precmd hook to keep init clean.
+if [[ "${MACSMITH_UPDATE_CHECK:-0}" == "1" ]]; then
+  _macsmith_data="$HOME/.local/share/macsmith"
+  # Defer notification to first prompt to keep init output clean
+  if [[ -f "$_macsmith_data/version" ]] && [[ -f "$_macsmith_data/latest-remote-version" ]]; then
+    _local_ver="$(<"$_macsmith_data/version")"
+    _remote_ver="$(<"$_macsmith_data/latest-remote-version")"
     if [[ -n "$_local_ver" ]] && [[ -n "$_remote_ver" ]] && [[ "$_local_ver" != "$_remote_ver" ]]; then
       # Store versions for deferred display (zsh functions don't capture closures)
-      _macos_dev_setup_pending_local="$_local_ver"
-      _macos_dev_setup_pending_remote="$_remote_ver"
-      _macos_dev_setup_update_notice() {
-        printf "\033[0;34m[macOS Dev Setup]\033[0m Update available: %s -> %s\n" "$_macos_dev_setup_pending_local" "$_macos_dev_setup_pending_remote"
+      _macsmith_pending_local="$_local_ver"
+      _macsmith_pending_remote="$_remote_ver"
+      _macsmith_update_notice() {
+        printf "\033[0;34m[macsmith]\033[0m Update available: %s -> %s\n" "$_macsmith_pending_local" "$_macsmith_pending_remote"
         printf "  Run: \033[0;32mupgrade\033[0m\n"
         # Self-removing: only show once per shell session
-        add-zsh-hook -d precmd _macos_dev_setup_update_notice
-        unset -f _macos_dev_setup_update_notice
-        unset _macos_dev_setup_pending_local _macos_dev_setup_pending_remote
+        add-zsh-hook -d precmd _macsmith_update_notice
+        unset -f _macsmith_update_notice
+        unset _macsmith_pending_local _macsmith_pending_remote
       }
       autoload -Uz add-zsh-hook
-      add-zsh-hook precmd _macos_dev_setup_update_notice
+      add-zsh-hook precmd _macsmith_update_notice
     fi
     unset _local_ver _remote_ver
   fi
   # Background check: fetch latest version from GitHub API (async, no shell delay)
-  if [[ -f "$_macos_dev_setup_data/version" ]]; then
+  if [[ -f "$_macsmith_data/version" ]]; then
     _last_check=0
-    [[ -f "$_macos_dev_setup_data/last-update-check" ]] && _last_check="$(<"$_macos_dev_setup_data/last-update-check")"
+    [[ -f "$_macsmith_data/last-update-check" ]] && _last_check="$(<"$_macsmith_data/last-update-check")"
     _now="$(date +%s)"
     if (( _now - _last_check > 86400 )); then
       (
         # Always update timestamp to avoid retrying on every shell start
-        date +%s > "$_macos_dev_setup_data/last-update-check"
-        _latest="$(curl -s --max-time 5 https://api.github.com/repos/26zl/MacOS-Dev-Setup/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
+        date +%s > "$_macsmith_data/last-update-check"
+        _latest="$(curl -s --max-time 5 https://api.github.com/repos/26zl/macsmith/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
         if [[ -n "$_latest" ]]; then
-          echo "$_latest" > "$_macos_dev_setup_data/latest-remote-version"
+          echo "$_latest" > "$_macsmith_data/latest-remote-version"
         fi
       ) & disown 2>/dev/null
     fi
     unset _last_check _now
   fi
-  unset _macos_dev_setup_data
+  unset _macsmith_data
 fi
 
 # ================================ FINAL PATH CLEANUP =======================
 # Clean PATH at the very end to catch any duplicates added by plugins or tools
-# Final PATH cleanup (must be last)
-# Explicitly ensure Homebrew paths come first, then rebuild PATH
-# Suppress all output to avoid Powerlevel10k instant prompt warnings
+# Explicitly ensure Homebrew paths come first, then rebuild PATH.
+# Wrapped in command grouping to suppress any stray variable output.
 HOMEBREW_PREFIX="$(_detect_brew_prefix)"
 if [[ -n "$HOMEBREW_PREFIX" ]]; then
   # Remove Homebrew paths from current PATH temporarily
-  # Use command grouping to avoid variable output
   {
     cleaned_path=$(echo "$PATH" | tr ':' '\n' | grep -v "^$HOMEBREW_PREFIX/bin$" | grep -v "^$HOMEBREW_PREFIX/sbin$" | tr '\n' ':' | sed 's/:$//' 2>/dev/null)
     # Rebuild PATH with Homebrew first
@@ -512,3 +507,13 @@ else
   # No Homebrew, just clean normally
   export PATH="$(_clean_path)" >/dev/null 2>&1
 fi
+
+# ================================ STARSHIP PROMPT ==========================
+# Initialize Starship after all PATH manipulation so it can find tools.
+# Fallback: if Starship isn't installed, leave the default zsh prompt.
+if command -v starship >/dev/null 2>&1; then
+  eval "$(starship init zsh)"
+fi
+
+# User-local overrides: source ~/.zshrc.local last so user edits win.
+[[ -f "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"

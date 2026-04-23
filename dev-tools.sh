@@ -11,7 +11,26 @@
 set +e  # Allow optional components to fail
 
 # Concurrent-run protection
-LOCK_FILE="/tmp/macos-dev-setup-devtools.lock"
+LOCK_FILE="/tmp/macsmith-devtools.lock"
+_dt_interrupted=0
+
+_dt_cleanup_on_exit() {
+  local exit_code=$?
+  rm -f "$LOCK_FILE" 2>/dev/null || true
+  if [[ "$_dt_interrupted" == "1" ]]; then
+    printf '\n\033[1;33m⚠️  dev-tools interrupted.\033[0m\n'
+    printf '  No persistent files are written by this script, so nothing is corrupted.\n'
+    printf '  Any in-flight Homebrew/curl install may be mid-transaction but is self-recoverable.\n'
+    printf '  Re-run ./dev-tools.sh when ready — it resumes where it left off.\n'
+  fi
+  exit "$exit_code"
+}
+_dt_on_interrupt() {
+  _dt_interrupted=1
+  trap - INT
+  kill -INT $$
+}
+
 _acquire_lock() {
   if [[ -f "$LOCK_FILE" ]]; then
     local lock_pid=""
@@ -24,9 +43,13 @@ _acquire_lock() {
     rm -f "$LOCK_FILE"
   fi
   echo $$ > "$LOCK_FILE"
-  trap 'rm -f "$LOCK_FILE"' EXIT INT TERM HUP
 }
 _acquire_lock
+# Register traps at SCRIPT scope. In zsh `trap ... EXIT` inside a function
+# fires when the function returns (LOCAL_TRAPS), which would kill the script
+# immediately. Registering here makes the trap script-scoped.
+trap _dt_cleanup_on_exit EXIT TERM HUP
+trap _dt_on_interrupt INT
 
 # Ensure standard Unix tools are in PATH
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
@@ -114,6 +137,90 @@ _ask_user() {
     [Yy]|[Yy][Ee][Ss]) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Generic Homebrew batch installer. Skips already-installed packages and
+# records failures individually so one bad package doesn't stop the rest.
+_brew_batch() {
+  local label="$1"; shift
+  local brew="$HOMEBREW_PREFIX/bin/brew"
+  [[ -z "$HOMEBREW_PREFIX" ]] || [[ ! -x "$brew" ]] && { warn "$label: Homebrew not available"; return 0; }
+  local failed=()
+  local pkg
+  for pkg in "$@"; do
+    if "$brew" list --formula "$pkg" >/dev/null 2>&1; then
+      continue
+    fi
+    echo "  installing $pkg..."
+    if ! "$brew" install "$pkg" >/dev/null 2>&1; then
+      failed+=("$pkg")
+    fi
+  done
+  if (( ${#failed[@]} > 0 )); then
+    warn "$label: failed to install: ${failed[*]}"
+  fi
+}
+
+_brew_batch_cask() {
+  local label="$1"; shift
+  local brew="$HOMEBREW_PREFIX/bin/brew"
+  [[ -z "$HOMEBREW_PREFIX" ]] || [[ ! -x "$brew" ]] && { warn "$label: Homebrew not available"; return 0; }
+  local failed=()
+  local pkg
+  for pkg in "$@"; do
+    if "$brew" list --cask "$pkg" >/dev/null 2>&1; then
+      continue
+    fi
+    echo "  installing $pkg (cask)..."
+    if ! "$brew" install --cask "$pkg" >/dev/null 2>&1; then
+      failed+=("$pkg")
+    fi
+  done
+  if (( ${#failed[@]} > 0 )); then
+    warn "$label: failed to install: ${failed[*]}"
+  fi
+}
+
+# Generic single-tool brew installer with presence check + prompt.
+# Args: tool-name, display-name, default-answer (Y|N), optional tap
+_install_brew_tool() {
+  local tool="$1"
+  local display="$2"
+  local default="${3:-Y}"
+  local tap="${4:-}"
+  local brew="$HOMEBREW_PREFIX/bin/brew"
+
+  if command -v "$tool" >/dev/null 2>&1; then
+    echo "${GREEN}✅ $display already installed${NC}"
+    return 0
+  fi
+  if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$brew" ]]; then
+    if "$brew" list --formula "$tool" >/dev/null 2>&1; then
+      echo "${GREEN}✅ $display already installed (via Homebrew)${NC}"
+      return 0
+    fi
+  fi
+
+  if [[ "$CHECK_MODE" == true ]]; then
+    echo "${YELLOW}📦 $display: Would install via Homebrew${NC}"
+    return 0
+  fi
+
+  if [[ -z "$HOMEBREW_PREFIX" ]] || [[ ! -x "$brew" ]]; then
+    warn "$display installation requires Homebrew"
+    return 0
+  fi
+
+  if _ask_user "${YELLOW}📦 $display not found. Install via Homebrew?" "$default"; then
+    if [[ -n "$tap" ]]; then
+      "$brew" tap "$tap" >/dev/null 2>&1 || warn "$display: failed to tap $tap"
+    fi
+    if "$brew" install "$tool" >/dev/null 2>&1; then
+      echo "${GREEN}✅ $display installed${NC}"
+    else
+      warn "$display installation failed"
+    fi
+  fi
 }
 
 # Check if running on macOS
@@ -500,7 +607,7 @@ install_chruby() {
     
     if [[ "$ruby_installed" == false ]]; then
       echo "  ${BLUE}INFO:${NC} Installing latest Ruby via ruby-install..."
-      # Get latest stable Ruby version using same method as maintain-system.sh
+      # Get latest stable Ruby version using same method as macsmith.sh
       local latest_ruby
       latest_ruby=$(ruby-install --list ruby 2>/dev/null | /usr/bin/awk '/^ruby [0-9]+\.[0-9]+\.[0-9]+$/ {print $2}' | /usr/bin/sort -V | /usr/bin/tail -n1)
       
@@ -653,7 +760,8 @@ install_swiftly() {
       if [[ -n "$latest_swift" && "$latest_swift" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo "  ${BLUE}INFO:${NC} Installing Swift $latest_swift (this may take a few minutes)..."
         if swiftly install --assume-yes "$latest_swift" 2>/dev/null; then
-          swiftly use --assume-yes "$latest_swift" 2>/dev/null || true
+          # Run from $HOME so swiftly doesn't rewrite a project-local .swift-version
+          (cd "$HOME" && swiftly use --assume-yes "$latest_swift") 2>/dev/null || true
           echo "  ${GREEN}✅ Swift $latest_swift installed and activated${NC}"
         else
           echo "  ${YELLOW}⚠️  Failed to install Swift via swiftly (you can install manually later with: swiftly install <version>)${NC}"
@@ -682,7 +790,8 @@ install_swiftly() {
       if [[ -n "$latest_swift" && "$latest_swift" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo "  ${BLUE}INFO:${NC} Installing Swift $latest_swift (this may take a few minutes)..."
         if swiftly install --assume-yes "$latest_swift" 2>/dev/null; then
-          swiftly use --assume-yes "$latest_swift" 2>/dev/null || true
+          # Run from $HOME so swiftly doesn't rewrite a project-local .swift-version
+          (cd "$HOME" && swiftly use --assume-yes "$latest_swift") 2>/dev/null || true
           echo "  ${GREEN}✅ Swift $latest_swift installed and activated${NC}"
         else
           echo "  ${YELLOW}⚠️  Failed to install Swift via swiftly (you can install manually later with: swiftly install <version>)${NC}"
@@ -817,6 +926,31 @@ install_dotnet() {
   fi
 }
 
+# ============================================================================
+# Modern Python / JS tooling (brew-only, one-liner installs)
+# ============================================================================
+
+install_uv()   { _install_brew_tool uv   "uv (fast Python package manager)"  "Y"; }
+install_bun()  { _install_brew_tool bun  "bun (JS/TS runtime + pkg manager)" "Y"; }
+install_pnpm() { _install_brew_tool pnpm "pnpm (fast Node package manager)"  "Y"; }
+install_deno() { _install_brew_tool deno "deno (secure JS/TS runtime)"       "N"; }
+
+# ============================================================================
+# JVM ecosystem batch (opt-in)
+# ============================================================================
+
+install_jvm_ecosystem() {
+  if [[ "$CHECK_MODE" == true ]]; then
+    echo "${YELLOW}📦 JVM extras: Would install kotlin, scala, clojure, gradle, maven, groovy${NC}"
+    return 0
+  fi
+  if ! _ask_user "${YELLOW}📦 Install JVM extras (Kotlin, Scala, Clojure, Gradle, Maven, Groovy)?" "N"; then
+    return 0
+  fi
+  _brew_batch "jvm-extras" kotlin scala clojure gradle maven groovy
+  echo "${GREEN}✅ JVM extras installed${NC}"
+}
+
 # Test detection function
 test_detection() {
   local all_found=0
@@ -829,6 +963,10 @@ test_detection() {
   local tools=(
     "conda:Conda/Miniforge"
     "pipx:pipx"
+    "uv:uv"
+    "bun:bun"
+    "pnpm:pnpm"
+    "deno:deno"
     "pyenv:pyenv"
     "nvm:nvm"
     "chruby:chruby"
@@ -860,7 +998,7 @@ test_detection() {
               found_via_brew=true
             fi
             ;;
-          pipx|pyenv|go|chruby|ruby-install)
+          pipx|pyenv|go|chruby|ruby-install|uv|bun|pnpm|deno)
             if "$HOMEBREW_PREFIX/bin/brew" list "$tool" >/dev/null 2>&1; then
               found_via_brew=true
             fi
@@ -948,21 +1086,30 @@ main() {
   
   if [[ "$CHECK_MODE" == false ]]; then
     echo ""
-    echo "This script will help you install development tools:"
-    echo "  - Language package managers: Conda, pipx"
-    echo "  - Language version managers: pyenv, nvm, chruby, rustup, swiftly"
-    echo "  - Language runtimes: Go, Java, .NET"
+    echo "This script installs language tooling:"
+    echo "  - Package managers: Conda, pipx, uv"
+    echo "  - Modern JS: bun, pnpm, deno"
+    echo "  - Version managers: pyenv, nvm, chruby, rustup, swiftly"
+    echo "  - Runtimes: Go, Java, .NET"
+    echo "  - Opt-in: JVM extras (Kotlin/Scala/Clojure/Gradle/Maven/Groovy)"
     echo ""
-    echo "Note: Version managers will also install the latest/latest LTS version of each language."
+    echo "Note: Version managers will also install the latest/LTS version of each language."
     echo "      Some tools require Homebrew to be installed first."
     echo "      Run './install.sh' to install system package managers (Homebrew, MacPorts, Nix, mas)."
     echo ""
   fi
-  
+
   # Language Package Managers
   echo "${BLUE}=== Language Package Managers ===${NC}"
   install_conda
   install_pipx
+  install_uv
+
+  echo ""
+  echo "${BLUE}=== Modern JS tooling ===${NC}"
+  install_bun
+  install_pnpm
+  install_deno
 
   echo ""
   echo "${BLUE}=== Language Version Managers & Runtimes ===${NC}"
@@ -974,6 +1121,10 @@ main() {
   install_go
   install_java
   install_dotnet
+
+  echo ""
+  echo "${BLUE}=== Optional ===${NC}"
+  install_jvm_ecosystem
   
   if [[ "$CHECK_MODE" == true ]]; then
     echo ""

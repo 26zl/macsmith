@@ -6,6 +6,10 @@
 desktop-notifications = false
 quit-after-last-window-closed = true
 shell-integration = zsh
+# ssh-env: falls back to TERM=xterm-256color on hosts without ghostty's terminfo
+# ssh-terminfo: auto-installs ghostty's terminfo on remote hosts on first connect
+# sudo: preserves TERMINFO through sudo so 'xterm-ghostty: unknown' stops
+shell-integration-features = ssh-env,ssh-terminfo,sudo
 clipboard-write = allow
 copy-on-select = false
 

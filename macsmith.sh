@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 
-# maintain-system - Standalone system and dev environment maintenance script
-# Usage: maintain-system [update|verify|versions|upgrade]
+# macsmith - Standalone system and dev environment maintenance script
+# Usage: macsmith [update|verify|versions|upgrade]
 
 # Wrap entire script in a block so zsh reads the full file into memory
 # before execution. This prevents parse errors when self-upgrade replaces
@@ -397,7 +397,7 @@ _setup_go_permanent() {
   [[ -z "$goroot" || ! -d "$goroot" ]] && return 1
   
   local zprofile="$HOME/.zprofile"
-  local marker="# Managed by macOS Development Environment Setup - Go configuration"
+  local marker="# Managed by macsmith - Go configuration"
   local go_config_block="export GOROOT=\"$goroot\"
 export PATH=\"\$GOROOT/bin:\$PATH\""
 
@@ -982,7 +982,7 @@ update() {
   # Check for Homebrew - skip if missing (install via install.sh)
   if ! command -v brew >/dev/null 2>&1; then
     echo "${GREEN}[Homebrew]${NC} Not found - skipping"
-    echo "  ${BLUE}INFO:${NC} To install Homebrew, run: 'install'"
+    echo "  ${BLUE}INFO:${NC} To install Homebrew, run: 'sys-install'"
   fi
   
   if command -v brew >/dev/null 2>&1; then
@@ -1017,8 +1017,6 @@ update() {
       [[ -n "$brew_outdated_formula" ]] && brew_outdated_formula_count=$(echo "$brew_outdated_formula" | grep -E '^[[:alnum:]]' | wc -l | tr -d ' ' || echo 0)
       [[ -n "$brew_outdated_cask" ]] && brew_outdated_cask_count=$(echo "$brew_outdated_cask" | grep -E '^[[:alnum:]]' | wc -l | tr -d ' ' || echo 0)
       local brew_outdated_total=$((brew_outdated_formula_count + brew_outdated_cask_count))
-      local brew_had_pending=false
-      [[ "$brew_outdated_total" -gt 0 ]] && brew_had_pending=true
       if [[ -n "$brew_outdated_formula" || -n "$brew_outdated_cask" ]]; then
         echo "  Pending Homebrew updates:"
         if [[ -n "$brew_outdated_formula" ]]; then
@@ -1038,7 +1036,7 @@ update() {
       # Initialize variables that would have been set in the success path
       local brew_outdated_formula="" brew_outdated_cask=""
       local brew_outdated_formula_count=0 brew_outdated_cask_count=0
-      local brew_outdated_total=0 brew_had_pending=false
+      local brew_outdated_total=0
     fi
 
     local brew_formula_upgraded=false
@@ -1150,7 +1148,7 @@ update() {
   # Check for MacPorts - skip if missing (install via install.sh)
   if ! command -v port >/dev/null 2>&1; then
     echo "${GREEN}[MacPorts]${NC} Not found - skipping"
-    echo "  ${BLUE}INFO:${NC} To install MacPorts, run: 'install'"
+    echo "  ${BLUE}INFO:${NC} To install MacPorts, run: 'sys-install'"
   fi
   
   if command -v port >/dev/null 2>&1; then
@@ -1723,10 +1721,10 @@ update() {
   fi
 
   if command -v pyenv >/dev/null 2>&1 && [[ -n "$pyenv_target" && "$pyenv_target" != "system" ]]; then
-    if _is_disabled "${MAINTAIN_SYSTEM_CLEAN_PYENV:-}"; then
-      echo "${GREEN}[pyenv]${NC} Cleanup disabled; set MAINTAIN_SYSTEM_CLEAN_PYENV=1 or unset to enable"
+    if _is_disabled "${MACSMITH_CLEAN_PYENV:-}"; then
+      echo "${GREEN}[pyenv]${NC} Cleanup disabled; set MACSMITH_CLEAN_PYENV=1 or unset to enable"
     else
-      local keep_list_raw="${MAINTAIN_SYSTEM_PYENV_KEEP:-}"
+      local keep_list_raw="${MACSMITH_PYENV_KEEP:-}"
       keep_list_raw="${keep_list_raw//,/ }"
       local versions_to_keep=("$pyenv_target" "system")
 
@@ -1737,7 +1735,7 @@ update() {
         done
       fi
 
-      echo "${GREEN}[pyenv]${NC} Removing old versions (keeping $pyenv_target and any in MAINTAIN_SYSTEM_PYENV_KEEP)..."
+      echo "${GREEN}[pyenv]${NC} Removing old versions (keeping $pyenv_target and any in MACSMITH_PYENV_KEEP)..."
       pyenv versions --bare 2>/dev/null | while read -r ver; do
         [[ -z "$ver" ]] && continue
         local should_keep=false
@@ -1777,10 +1775,10 @@ update() {
       nvm reinstall-packages "$prev_nvm" || true
     fi
     if [[ -n "$active_nvm" && "$active_nvm" != "system" ]]; then
-      if _is_disabled "${MAINTAIN_SYSTEM_CLEAN_NVM:-}"; then
-        echo "${GREEN}[nvm]${NC} Cleanup disabled; set MAINTAIN_SYSTEM_CLEAN_NVM=1 or unset to enable"
+      if _is_disabled "${MACSMITH_CLEAN_NVM:-}"; then
+        echo "${GREEN}[nvm]${NC} Cleanup disabled; set MACSMITH_CLEAN_NVM=1 or unset to enable"
       else
-        local keep_list_raw="${MAINTAIN_SYSTEM_NVM_KEEP:-}"
+        local keep_list_raw="${MACSMITH_NVM_KEEP:-}"
         keep_list_raw="${keep_list_raw//,/ }"
         local keep_versions=("$active_nvm")
 
@@ -1792,7 +1790,7 @@ update() {
           done
         fi
 
-        echo "${GREEN}[nvm]${NC} Removing older Node versions (keeping $active_nvm and any in MAINTAIN_SYSTEM_NVM_KEEP)..."
+        echo "${GREEN}[nvm]${NC} Removing older Node versions (keeping $active_nvm and any in MACSMITH_NVM_KEEP)..."
         # Get only actually installed versions dynamically
         # nvm ls shows only installed versions (not remote/available versions)
         while IFS= read -r ver; do
@@ -1956,8 +1954,8 @@ update() {
     fi
     
     # Auto-fix Ruby gems by default allow opt-out
-    if _is_disabled "${MAINTAIN_SYSTEM_FIX_RUBY_GEMS:-}"; then
-      echo "${GREEN}[Ruby]${NC} Gem auto-fix disabled; set MAINTAIN_SYSTEM_FIX_RUBY_GEMS=1 or unset to enable"
+    if _is_disabled "${MACSMITH_FIX_RUBY_GEMS:-}"; then
+      echo "${GREEN}[Ruby]${NC} Gem auto-fix disabled; set MACSMITH_FIX_RUBY_GEMS=1 or unset to enable"
     else
       _fix_all_ruby_gems
     fi
@@ -1969,10 +1967,10 @@ update() {
   if [[ "$chruby_available" == "true" ]] && [[ -n "$chruby_target" ]]; then
     local rubies_root="$HOME/.rubies"
     if [[ -d "$rubies_root" ]]; then
-      if _is_disabled "${MAINTAIN_SYSTEM_CLEAN_CHRUBY:-}"; then
-        echo "${GREEN}[chruby]${NC} Cleanup disabled; set MAINTAIN_SYSTEM_CLEAN_CHRUBY=1 or unset to enable"
+      if _is_disabled "${MACSMITH_CLEAN_CHRUBY:-}"; then
+        echo "${GREEN}[chruby]${NC} Cleanup disabled; set MACSMITH_CLEAN_CHRUBY=1 or unset to enable"
       else
-        local keep_list_raw="${MAINTAIN_SYSTEM_CHRUBY_KEEP:-}"
+        local keep_list_raw="${MACSMITH_CHRUBY_KEEP:-}"
         keep_list_raw="${keep_list_raw//,/ }"
         local keep_versions=("$chruby_target")
 
@@ -1984,7 +1982,7 @@ update() {
           done
         fi
 
-        echo "${GREEN}[chruby]${NC} Removing old rubies (keeping $chruby_target and any in MAINTAIN_SYSTEM_CHRUBY_KEEP)..."
+        echo "${GREEN}[chruby]${NC} Removing old rubies (keeping $chruby_target and any in MACSMITH_CHRUBY_KEEP)..."
         for dir in "$rubies_root"/ruby-*; do
           [[ -d "$dir" ]] || continue
           local ruby_version="${dir##*/}"
@@ -2081,7 +2079,7 @@ update() {
       
       # Get latest snapshot if user wants snapshots (optional, can be controlled via env var)
       local latest_snapshot=""
-      if [[ "${MAINTAIN_SYSTEM_SWIFT_SNAPSHOTS:-0}" == "1" ]]; then
+      if [[ "${MACSMITH_SWIFT_SNAPSHOTS:-0}" == "1" ]]; then
         # swiftly list-available outputs snapshot names, extract version (usually 2nd field)
         latest_snapshot="$(swiftly list-available 2>/dev/null | grep -E "(main-snapshot|release.*snapshot)" | head -n1 | awk '{print $2}' || echo "")"
       fi
@@ -2118,7 +2116,7 @@ update() {
       
       # Check for newer snapshots (informational only)
       if [[ "$is_snapshot" == "false" && -n "$latest_snapshot" ]]; then
-        echo "  ${BLUE}INFO:${NC} Development snapshot available: $latest_snapshot (set MAINTAIN_SYSTEM_SWIFT_SNAPSHOTS=1 to enable)"
+        echo "  ${BLUE}INFO:${NC} Development snapshot available: $latest_snapshot (set MACSMITH_SWIFT_SNAPSHOTS=1 to enable)"
       fi
     else
       echo "  ${BLUE}INFO:${NC} No Swift version active via swiftly"
@@ -2351,7 +2349,7 @@ update() {
   # Check for mas - skip if missing (install via install.sh)
   if ! command -v mas >/dev/null 2>&1; then
     echo "${GREEN}[mas]${NC} Not found - skipping"
-    echo "  ${BLUE}INFO:${NC} To install mas, run: 'install'"
+    echo "  ${BLUE}INFO:${NC} To install mas, run: 'sys-install'"
   fi
   
   # mas (Mac App Store CLI) - update App Store apps
@@ -2408,7 +2406,7 @@ update() {
   # Check for Nix - skip if missing (install via install.sh)
   if ! command -v nix >/dev/null 2>&1 && ! [[ -d /nix ]] && ! [[ -f /nix/var/nix/profiles/default/bin/nix ]]; then
     echo "${GREEN}[Nix]${NC} Not found - skipping"
-    echo "  ${BLUE}INFO:${NC} To install Nix, run: 'install'"
+    echo "  ${BLUE}INFO:${NC} To install Nix, run: 'sys-install'"
   fi
   
   # Nix - integrated update with smart preview and cleanup
@@ -2592,23 +2590,22 @@ verify() {
   if command -v ruby >/dev/null 2>&1; then
     ok "Ruby" "$(ruby -v)"
     command -v gem >/dev/null 2>&1 && ok "Gem" "$(gem -v)"
-    if type chruby >/dev/null 2>&1; then
-      # Source chruby if needed
-      if ! type chruby >/dev/null 2>&1; then
-        [[ -f /usr/local/share/chruby/chruby.sh ]] && source /usr/local/share/chruby/chruby.sh 2>/dev/null || true
-        [[ -f "$HOME/.local/share/chruby/chruby.sh" ]] && source "$HOME/.local/share/chruby/chruby.sh" 2>/dev/null || true
-        if command -v brew >/dev/null 2>&1; then
-          local chruby_path="$(brew --prefix chruby 2>/dev/null || echo "")"
-          [[ -n "$chruby_path" && -f "$chruby_path/share/chruby/chruby.sh" ]] && source "$chruby_path/share/chruby/chruby.sh" 2>/dev/null || true
-        fi
+    # Source chruby if not already a shell function (zsh.sh sources it in login
+    # shells, but this script can be run without the shell init path)
+    if ! type chruby >/dev/null 2>&1; then
+      [[ -f /usr/local/share/chruby/chruby.sh ]] && source /usr/local/share/chruby/chruby.sh 2>/dev/null || true
+      [[ -f "$HOME/.local/share/chruby/chruby.sh" ]] && source "$HOME/.local/share/chruby/chruby.sh" 2>/dev/null || true
+      if ! type chruby >/dev/null 2>&1 && command -v brew >/dev/null 2>&1; then
+        local chruby_path="$(brew --prefix chruby 2>/dev/null || echo "")"
+        [[ -n "$chruby_path" && -f "$chruby_path/share/chruby/chruby.sh" ]] && source "$chruby_path/share/chruby/chruby.sh" 2>/dev/null || true
       fi
-      if type chruby >/dev/null 2>&1; then
-        local chruby_version="$(chruby --version 2>/dev/null | head -n1)"
-        if [[ -n "$chruby_version" ]]; then
-          ok "chruby" "$chruby_version"
-        else
-          ok "chruby" "installed"
-        fi
+    fi
+    if type chruby >/dev/null 2>&1; then
+      local chruby_version="$(chruby --version 2>/dev/null | head -n1)"
+      if [[ -n "$chruby_version" ]]; then
+        ok "chruby" "$chruby_version"
+      else
+        ok "chruby" "installed"
       fi
     fi
   else
@@ -2641,7 +2638,11 @@ verify() {
       else
         ok "Python" "$("$pybin" -V 2>/dev/null)"
       fi
-      [[ -n "$latest_py" && "$active_py" == "$latest_py" ]] && ok "pyenv" "active $active_py" || warn "pyenv" "active ${active_py:-unknown}; latest ${latest_py:-unknown}"
+      if [[ -n "$latest_py" && "$active_py" == "$latest_py" ]]; then
+        ok "pyenv" "active $active_py"
+      else
+        warn "pyenv" "active ${active_py:-unknown}; latest ${latest_py:-unknown}"
+      fi
     else
       ok "Python" "$("$pybin" -V 2>/dev/null)"
     fi
@@ -2738,11 +2739,15 @@ verify() {
           warn "Node" "not installed (nvm active but no version selected)"
         fi
       fi
-      command -v npm >/dev/null 2>&1 && ok "npm" "$(npm -v)" || warn "npm" "not in PATH"
-      [[ -n "$defv" && "$nvm_current" == "$defv" ]] && ok "nvm" "current $nvm_current" || warn "nvm" "current ${nvm_current:-N/A}; default ${defv:-N/A}"
+      if command -v npm >/dev/null 2>&1; then ok "npm" "$(npm -v)"; else warn "npm" "not in PATH"; fi
+      if [[ -n "$defv" && "$nvm_current" == "$defv" ]]; then
+        ok "nvm" "current $nvm_current"
+      else
+        warn "nvm" "current ${nvm_current:-N/A}; default ${defv:-N/A}"
+      fi
     else
       ok "Node" "$(node -v)"
-      command -v npm >/dev/null 2>&1 && ok "npm" "$(npm -v)" || warn "npm" "not in PATH"
+      if command -v npm >/dev/null 2>&1; then ok "npm" "$(npm -v)"; else warn "npm" "not in PATH"; fi
     fi
   else
     miss "Node"
@@ -2761,7 +2766,7 @@ verify() {
   fi
   if command -v rustup >/dev/null 2>&1; then
     local active="$(rustup show active-toolchain 2>/dev/null | head -n1)"
-    [[ "$active" == stable* ]] && ok "rustup" "$active" || warn "rustup" "$active"
+    if [[ "$active" == stable* ]]; then ok "rustup" "$active"; else warn "rustup" "$active"; fi
   fi
   command -v cargo >/dev/null 2>&1 && ok "Cargo" "$(cargo --version 2>/dev/null || echo "installed")"
 
@@ -2814,17 +2819,31 @@ verify() {
     if command -v swiftly >/dev/null 2>&1; then
       warn "Swift" "not installed (run 'update' to install)"
       local swiftly_installed="$(swiftly list 2>/dev/null | head -n1 || echo "")"
-      [[ -n "$swiftly_installed" ]] && warn "swiftly" "installed but Swift not in PATH" || warn "swiftly" "installed but not initialized"
+      if [[ -n "$swiftly_installed" ]]; then
+        warn "swiftly" "installed but Swift not in PATH"
+      else
+        warn "swiftly" "installed but not initialized"
+      fi
     else
       miss "Swift"
       echo "  ${BLUE}INFO:${NC} To install Swift and swiftly, run: 'dev-tools'"
     fi
   fi
 
-  command -v go   >/dev/null 2>&1 && ok "Go"   "$(go version)" || { miss "Go"; echo "  ${BLUE}INFO:${NC} To install Go, run: 'dev-tools'"; }
-  command -v java >/dev/null 2>&1 && ok "Java" "$(java -version 2>&1 | head -n1)" || { miss "Java"; echo "  ${BLUE}INFO:${NC} To install Java, run: 'dev-tools'"; }
-  command -v clang >/dev/null 2>&1 && ok "Clang" "$(clang --version | head -n1)" || miss "Clang"
-  command -v gcc  >/dev/null 2>&1 && ok "GCC"  "$(gcc --version | head -n1)" || warn "GCC" "not found"
+  if command -v go >/dev/null 2>&1; then
+    ok "Go" "$(go version)"
+  else
+    miss "Go"
+    echo "  ${BLUE}INFO:${NC} To install Go, run: 'dev-tools'"
+  fi
+  if command -v java >/dev/null 2>&1; then
+    ok "Java" "$(java -version 2>&1 | head -n1)"
+  else
+    miss "Java"
+    echo "  ${BLUE}INFO:${NC} To install Java, run: 'dev-tools'"
+  fi
+  if command -v clang >/dev/null 2>&1; then ok "Clang" "$(clang --version | head -n1)"; else miss "Clang"; fi
+  if command -v gcc >/dev/null 2>&1; then ok "GCC" "$(gcc --version | head -n1)"; else warn "GCC" "not found"; fi
   
   # Detect MySQL dynamically
   local mysql_found=false
@@ -2877,14 +2896,14 @@ verify() {
     ok "Homebrew" "$brew_version"
   else
     miss "Homebrew"
-    echo "  ${BLUE}INFO:${NC} To install Homebrew, run: 'install'"
+    echo "  ${BLUE}INFO:${NC} To install Homebrew, run: 'sys-install'"
   fi
   if command -v port >/dev/null 2>&1; then
     local port_version="$(port version 2>/dev/null || echo "installed")"
     ok "MacPorts" "$port_version"
   else
     warn "MacPorts" "not installed"
-    echo "  ${BLUE}INFO:${NC} To install MacPorts, run: 'install'"
+    echo "  ${BLUE}INFO:${NC} To install MacPorts, run: 'sys-install'"
   fi
 
   # mas (Mac App Store CLI)
@@ -2899,7 +2918,7 @@ verify() {
     fi
   else
     miss "mas"
-    echo "  ${BLUE}INFO:${NC} To install mas, run: 'install'"
+    echo "  ${BLUE}INFO:${NC} To install mas, run: 'sys-install'"
   fi
 
   # Nix - comprehensive status check
@@ -2927,7 +2946,7 @@ verify() {
       warn "Nix" "installed but not in PATH (run: ./scripts/nix-macos-maintenance.sh ensure-path or reinstall)"
     else
       miss "Nix"
-      echo "  ${BLUE}INFO:${NC} To install Nix, run: 'install'"
+      echo "  ${BLUE}INFO:${NC} To install Nix, run: 'sys-install'"
     fi
   fi
 
@@ -2953,6 +2972,20 @@ verify() {
     miss "PostgreSQL"
   fi
   
+  # Modern language tooling (installed via dev-tools.sh)
+  for _tool in uv bun pnpm deno; do
+    if command -v "$_tool" >/dev/null 2>&1; then
+      ok "$_tool" "$("$_tool" --version 2>/dev/null | head -n1)"
+    fi
+  done
+  # JVM ecosystem (opt-in batch in dev-tools.sh)
+  for _tool in kotlin scala clojure gradle mvn groovy; do
+    if command -v "$_tool" >/dev/null 2>&1; then
+      ok "$_tool" "$("$_tool" --version 2>/dev/null | head -n1)"
+    fi
+  done
+  unset _tool
+
   echo "${GREEN}==> Verify done${NC}"
   return 0
 }
@@ -3264,7 +3297,7 @@ versions() {
     echo "Homebrew ....... $brew_version ($brew_count formulae)"
   else
     echo "Homebrew ....... not installed"
-    echo "  To install: 'install'"
+    echo "  To install: 'sys-install'"
   fi
   if command -v port >/dev/null 2>&1; then
     local port_version="$(port version)"
@@ -3272,7 +3305,7 @@ versions() {
     echo "MacPorts ....... $port_version ($port_count ports)"
   else
     echo "MacPorts ....... not installed"
-    echo "  To install: 'install'"
+    echo "  To install: 'sys-install'"
   fi
 
   # mas (Mac App Store CLI)
@@ -3287,7 +3320,7 @@ versions() {
     fi
   else
     echo "mas ............. not installed"
-    echo "  To install: 'install'"
+    echo "  To install: 'sys-install'"
   fi
 
   # Nix
@@ -3314,7 +3347,7 @@ versions() {
     fi
   else
     echo "Nix ............. not installed"
-    echo "  To install: 'install'"
+    echo "  To install: 'sys-install'"
   fi
 
   if command -v mongod >/dev/null 2>&1; then
@@ -3341,17 +3374,31 @@ versions() {
     echo "PostgreSQL ..... not installed"
   fi
   
+  # Modern language tooling (installed via dev-tools.sh)
+  for _tool in uv bun pnpm deno; do
+    if command -v "$_tool" >/dev/null 2>&1; then
+      printf '%-15s %s\n' "$_tool" "$("$_tool" --version 2>/dev/null | head -n1)"
+    fi
+  done
+  # JVM ecosystem (opt-in batch in dev-tools.sh)
+  for _tool in kotlin scala clojure gradle mvn groovy; do
+    if command -v "$_tool" >/dev/null 2>&1; then
+      printf '%-15s %s\n' "$_tool" "$("$_tool" --version 2>/dev/null | head -n1)"
+    fi
+  done
+  unset _tool
+
   echo "${GREEN}===================================================${NC}"
   return 0
 }
 
 # ================================ SELF-UPGRADE =============================
 
-readonly GITHUB_REPO="26zl/MacOS-Dev-Setup"
-readonly DATA_DIR="$HOME/.local/share/macos-dev-setup"
+readonly GITHUB_REPO="26zl/macsmith"
+readonly DATA_DIR="$HOME/.local/share/macsmith"
 
 _self_upgrade() {
-  echo "${GREEN}=== macOS Dev Setup - Self-Upgrade ===${NC}"
+  echo "${GREEN}=== macsmith - Self-Upgrade ===${NC}"
   echo ""
 
   # Read local version
@@ -3362,7 +3409,7 @@ _self_upgrade() {
 
   if [[ -z "$local_version" ]]; then
     echo "${RED}❌ No local version found${NC}"
-    echo "  Run 'install' first to set up version tracking."
+    echo "  Run 'sys-install' first to set up version tracking."
     return 1
   fi
 
@@ -3399,22 +3446,66 @@ _self_upgrade() {
   echo ""
   echo "Upgrading ${BLUE}$local_version${NC} -> ${BLUE}$remote_version${NC}"
 
-  # Get zipball URL
-  local zipball_url=""
+  # Prefer our signed release asset (has matching .sha256) over GitHub's
+  # auto-generated zipball_url which has no checksum we publish.
+  local asset_url="" sha_url="" zipball_url=""
+  asset_url="$(echo "$api_response" | sed -n 's/.*"browser_download_url": *"\(https:\/\/[^"]*macsmith-[^"]*\.zip\)".*/\1/p' | grep -v '\.sha256' | head -n1)"
+  sha_url="$(echo "$api_response" | sed -n 's/.*"browser_download_url": *"\(https:\/\/[^"]*macsmith-[^"]*\.zip\.sha256\)".*/\1/p' | head -n1)"
   zipball_url="$(echo "$api_response" | sed -n 's/.*"zipball_url": *"\([^"]*\)".*/\1/p')"
-  if [[ -z "$zipball_url" ]]; then
-    echo "${RED}❌ Could not find download URL${NC}"
-    return 1
-  fi
 
-  # Download and extract
   local tmp_dir=""
   tmp_dir="$(mktemp -d)"
   trap 'rm -rf "$tmp_dir"; rm -f "$LOCK_FILE"' EXIT INT TERM HUP
 
-  echo "Downloading release..."
-  if ! curl -sL --connect-timeout 15 --max-time 120 --retry 3 "$zipball_url" -o "$tmp_dir/release.zip" 2>/dev/null; then
-    echo "${RED}❌ Download failed${NC}"
+  # Download + verify against published SHA-256 when possible
+  if [[ -n "$asset_url" ]] && [[ -n "$sha_url" ]]; then
+    echo "Downloading release asset ($asset_url)..."
+    if ! curl -sL --connect-timeout 15 --max-time 120 --retry 3 "$asset_url" -o "$tmp_dir/release.zip" 2>/dev/null; then
+      echo "${RED}❌ Asset download failed${NC}"
+      rm -rf "$tmp_dir"
+      return 1
+    fi
+    echo "Fetching checksum..."
+    if ! curl -sL --connect-timeout 15 --max-time 60 --retry 3 "$sha_url" -o "$tmp_dir/release.zip.sha256" 2>/dev/null; then
+      echo "${YELLOW}⚠️  Could not fetch checksum; aborting to be safe${NC}"
+      rm -rf "$tmp_dir"
+      return 1
+    fi
+    # The .sha256 file format is: "<hash>  <filename>"
+    local expected_sha actual_sha
+    expected_sha="$(awk '{print $1}' "$tmp_dir/release.zip.sha256")"
+    actual_sha="$(shasum -a 256 "$tmp_dir/release.zip" | awk '{print $1}')"
+    if [[ -z "$expected_sha" ]] || [[ "$expected_sha" != "$actual_sha" ]]; then
+      echo "${RED}❌ SHA-256 mismatch — refusing to install.${NC}"
+      echo "  expected: $expected_sha"
+      echo "  actual:   $actual_sha"
+      rm -rf "$tmp_dir"
+      return 1
+    fi
+    echo "${GREEN}✅ Checksum verified${NC}"
+  elif [[ -n "$zipball_url" ]]; then
+    # Fallback: no packaged asset found (pre-release-pipeline tags etc.).
+    # This path is UNVERIFIED — refuse by default and require explicit opt-in.
+    if [[ "${MACSMITH_ALLOW_UNSIGNED_UPGRADE:-0}" != "1" ]]; then
+      echo "${RED}❌ Refusing to upgrade: no signed release asset for this tag.${NC}"
+      echo "  The only available source is GitHub's auto-generated zipball, which"
+      echo "  has no matching checksum we publish, so we cannot verify its integrity."
+      echo ""
+      echo "  Options:"
+      echo "    1. Wait for a tag cut through the release pipeline (it ships .sha256)."
+      echo "    2. Pull manually: git pull && ./install.sh"
+      echo "    3. Opt in explicitly: MACSMITH_ALLOW_UNSIGNED_UPGRADE=1 macsmith upgrade"
+      rm -rf "$tmp_dir"
+      return 1
+    fi
+    echo "${YELLOW}⚠️  MACSMITH_ALLOW_UNSIGNED_UPGRADE=1 — downloading UNVERIFIED zipball.${NC}"
+    if ! curl -sL --connect-timeout 15 --max-time 120 --retry 3 "$zipball_url" -o "$tmp_dir/release.zip" 2>/dev/null; then
+      echo "${RED}❌ Download failed${NC}"
+      rm -rf "$tmp_dir"
+      return 1
+    fi
+  else
+    echo "${RED}❌ Could not find download URL${NC}"
     rm -rf "$tmp_dir"
     return 1
   fi
@@ -3437,59 +3528,65 @@ _self_upgrade() {
   # Track failures
   local upgrade_failed=false
 
-  # Update maintain-system binary
+  # Update macsmith binary. Write to a temp file next to the target
+  # then mv into place so Ctrl-C can't leave the binary half-written (and
+  # since we ARE that binary, a partial write would brick ourselves).
   local local_bin="$HOME/.local/bin"
-  if [[ -f "$extract_dir/maintain-system.sh" ]]; then
-    if cp "$extract_dir/maintain-system.sh" "$local_bin/maintain-system" && chmod +x "$local_bin/maintain-system"; then
-      echo "  Updated: maintain-system"
+  mkdir -p "$local_bin" 2>/dev/null || true
+  if [[ -f "$extract_dir/macsmith.sh" ]]; then
+    local _ms_tmp="${local_bin}/.macsmith.tmp.$$"
+    if cp "$extract_dir/macsmith.sh" "$_ms_tmp" \
+       && chmod +x "$_ms_tmp" \
+       && mv -f "$_ms_tmp" "$local_bin/macsmith"; then
+      echo "  Updated: macsmith"
     else
-      echo "  ${RED}Failed: maintain-system (check permissions on $local_bin)${NC}"
+      rm -f "$_ms_tmp" 2>/dev/null || true
+      echo "  ${RED}Failed: macsmith (check permissions on $local_bin)${NC}"
       upgrade_failed=true
     fi
   fi
 
-  # Update zsh.sh -> ~/.zshrc (preserve user customizations)
+  # Update zsh.sh -> ~/.zshrc (preserve user customizations). Write atomically
+  # via tempfile + mv so Ctrl-C can't leave a half-written shell config.
   if [[ -f "$extract_dir/zsh.sh" ]]; then
     local zshrc="$HOME/.zshrc"
-    if [[ -f "$zshrc" ]]; then
-      # Backup existing .zshrc
-      cp "$zshrc" "$zshrc.backup-$(date +%Y%m%d%H%M%S)"
+    local new_zshrc_content
+    new_zshrc_content="$(cat "$extract_dir/zsh.sh")"
 
-      # Preserve USER CUSTOMIZATIONS section if it exists
-      # Extract only the user content AFTER the marker line (not the marker itself)
+    if [[ -f "$zshrc" ]]; then
+      cp "$zshrc" "$zshrc.backup-$(date +%Y%m%d%H%M%S)"
+      # Preserve content after the USER CUSTOMIZATIONS marker (excluding marker)
       local user_section=""
       if grep -q "# USER CUSTOMIZATIONS" "$zshrc" 2>/dev/null; then
         user_section="$(sed -n '/^# USER CUSTOMIZATIONS/,$p' "$zshrc" | tail -n +2)"
       fi
-
-      if cp "$extract_dir/zsh.sh" "$zshrc"; then
-        # Re-append user customizations if they existed
-        # Check if new zsh.sh already has the marker; if not, add it
-        if [[ -n "$user_section" ]]; then
-          if ! grep -q "# USER CUSTOMIZATIONS" "$zshrc" 2>/dev/null; then
-            echo "" >> "$zshrc"
-            echo "# USER CUSTOMIZATIONS" >> "$zshrc"
-          fi
-          print -r -- "$user_section" >> "$zshrc"
+      if [[ -n "$user_section" ]]; then
+        # If the new zsh.sh already includes the marker, the section belongs right after it
+        if ! printf '%s' "$new_zshrc_content" | grep -q "# USER CUSTOMIZATIONS"; then
+          new_zshrc_content+="
+# USER CUSTOMIZATIONS
+"
+        else
+          new_zshrc_content+="
+"
         fi
-        echo "  Updated: ~/.zshrc (backup created)"
-      else
-        echo "  ${RED}Failed: ~/.zshrc (check permissions)${NC}"
-        upgrade_failed=true
+        new_zshrc_content+="$user_section"
       fi
+    fi
+
+    local _zsh_tmp="${zshrc}.tmp.$$"
+    if printf '%s\n' "$new_zshrc_content" > "$_zsh_tmp" && mv -f "$_zsh_tmp" "$zshrc"; then
+      echo "  Updated: ~/.zshrc${user_section:+ (backup created)}"
     else
-      if cp "$extract_dir/zsh.sh" "$zshrc"; then
-        echo "  Updated: ~/.zshrc"
-      else
-        echo "  ${RED}Failed: ~/.zshrc (check permissions)${NC}"
-        upgrade_failed=true
-      fi
+      rm -f "$_zsh_tmp" 2>/dev/null || true
+      echo "  ${RED}Failed: ~/.zshrc (check permissions)${NC}"
+      upgrade_failed=true
     fi
   fi
 
   # Copy scripts to data dir
   mkdir -p "$DATA_DIR"
-  for script_file in install.sh dev-tools.sh bootstrap.sh zsh.sh maintain-system.sh; do
+  for script_file in install.sh dev-tools.sh bootstrap.sh zsh.sh macsmith.sh; do
     if [[ -f "$extract_dir/$script_file" ]]; then
       cp "$extract_dir/$script_file" "$DATA_DIR/$script_file" || true
     fi
@@ -3519,12 +3616,12 @@ _self_upgrade() {
 
 # ================================ MAIN =====================================
 # Concurrent-run protection
-LOCK_FILE="/tmp/macos-dev-setup-maintain.lock"
+LOCK_FILE="/tmp/macsmith-maintain.lock"
 if [[ -f "$LOCK_FILE" ]]; then
   lock_pid=""
   lock_pid="$(<"$LOCK_FILE")"
   if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
-    echo "ERROR: Another instance of maintain-system is already running (PID $lock_pid)"
+    echo "ERROR: Another instance of macsmith is already running (PID $lock_pid)"
     echo "  If this is a mistake, remove the lock file: rm $LOCK_FILE"
     exit 1
   fi
@@ -3566,7 +3663,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    echo "Usage: maintain-system [update|verify|versions|upgrade|install|dev-tools]"
+    echo "Usage: macsmith [update|verify|versions|upgrade|install|dev-tools]"
     echo ""
     echo "Commands:"
     echo "  update    - Update Homebrew, Python, Node.js, Ruby, Rust, and other tools"
@@ -3577,11 +3674,11 @@ case "${1:-}" in
     echo "  dev-tools - Re-run the dev tools installer (Python, Node.js, Rust, etc.)"
     echo ""
     echo "Optional environment variables:"
-    echo "  MAINTAIN_SYSTEM_FIX_RUBY_GEMS=0|disabled Disable Ruby gem auto-fix"
-    echo "  MAINTAIN_SYSTEM_CLEAN_PYENV=0|disabled  Disable pyenv cleanup (MAINTAIN_SYSTEM_PYENV_KEEP=...)"
-    echo "  MAINTAIN_SYSTEM_CLEAN_NVM=0|disabled    Disable Node cleanup (MAINTAIN_SYSTEM_NVM_KEEP=...)"
-    echo "  MAINTAIN_SYSTEM_CLEAN_CHRUBY=0|disabled Disable chruby cleanup (MAINTAIN_SYSTEM_CHRUBY_KEEP=...)"
-    echo "  MAINTAIN_SYSTEM_SWIFT_SNAPSHOTS=1       Enable Swift development snapshot updates"
+    echo "  MACSMITH_FIX_RUBY_GEMS=0|disabled Disable Ruby gem auto-fix"
+    echo "  MACSMITH_CLEAN_PYENV=0|disabled  Disable pyenv cleanup (MACSMITH_PYENV_KEEP=...)"
+    echo "  MACSMITH_CLEAN_NVM=0|disabled    Disable Node cleanup (MACSMITH_NVM_KEEP=...)"
+    echo "  MACSMITH_CLEAN_CHRUBY=0|disabled Disable chruby cleanup (MACSMITH_CHRUBY_KEEP=...)"
+    echo "  MACSMITH_SWIFT_SNAPSHOTS=1       Enable Swift development snapshot updates"
     exit 1
     ;;
 esac

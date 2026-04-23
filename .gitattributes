@@ -1,0 +1,48 @@
+# macsmith — keep line endings sane across macOS/Linux/Windows checkouts.
+# Shell scripts MUST stay LF even on Windows (WSL/MSYS) or they fail to execute.
+
+# Default: auto-detect text, keep it clean
+* text=auto eol=lf
+
+# Shell and config — always LF
+*.sh        text eol=lf
+*.zsh       text eol=lf
+*.bash      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.toml      text eol=lf
+*.md        text eol=lf diff=markdown
+*.json      text eol=lf
+*.conf      text eol=lf
+*.txt       text eol=lf
+
+# Git-metadata files — LF
+.gitignore       text eol=lf
+.gitattributes   text eol=lf
+.editorconfig    text eol=lf
+LICENSE          text eol=lf
+
+# Binary — never line-ending-munge
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.tar   binary
+*.gz    binary
+
+# GitHub language stats: don't count these as "the" language
+*.md         linguist-documentation
+CLAUDE.md    linguist-documentation
+background/* linguist-vendored
+
+# Release/export hygiene — don't ship dev files in release zipball
+.github/        export-ignore
+.vscode/        export-ignore
+.claude/        export-ignore
+.gitattributes  export-ignore
+.gitignore      export-ignore
+quick-test.sh   export-ignore
+CLAUDE.md       export-ignore

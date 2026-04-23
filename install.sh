@@ -1,11 +1,39 @@
 #!/usr/bin/env zsh
 
-# macOS Development Environment Setup - Installation Script
+# macsmith - Installation Script
 
 set +e  # Allow optional components to fail (will be set per function)
 
-# Concurrent-run protection
-LOCK_FILE="/tmp/macos-dev-setup-install.lock"
+# Concurrent-run protection + interrupt handling.
+# TMP_FILES collects any tempfiles created by _atomic_* helpers so Ctrl-C
+# cleans them up rather than leaving ".tmp.XXXXXX" droppings.
+LOCK_FILE="/tmp/macsmith-install.lock"
+typeset -ga TMP_FILES=()
+_interrupted=0
+
+_cleanup_on_exit() {
+  local exit_code=$?
+  # Remove any tempfiles from atomic writes that never got renamed into place
+  local f
+  for f in "${TMP_FILES[@]}"; do
+    [[ -n "$f" ]] && rm -f "$f" 2>/dev/null || true
+  done
+  rm -f "$LOCK_FILE" 2>/dev/null || true
+  if [[ "$_interrupted" == "1" ]]; then
+    printf '\n\033[1;33m⚠️  Install interrupted.\033[0m\n'
+    printf '  Any files already written are complete (atomic writes). Partial ones were rolled back.\n'
+    printf '  Backups of your previous config (if any) are in: ~/.zshrc.backup.* and ~/.zprofile.backup.*\n'
+    printf '  Re-run this script when ready — it is idempotent.\n'
+  fi
+  exit "$exit_code"
+}
+_on_interrupt() {
+  _interrupted=1
+  # Re-raise SIGINT so parent (bootstrap.sh) sees the cancel too
+  trap - INT
+  kill -INT $$
+}
+
 _acquire_lock() {
   if [[ -f "$LOCK_FILE" ]]; then
     local lock_pid=""
@@ -19,14 +47,51 @@ _acquire_lock() {
     rm -f "$LOCK_FILE"
   fi
   echo $$ > "$LOCK_FILE"
-  trap 'rm -f "$LOCK_FILE"' EXIT INT TERM HUP
 }
 _acquire_lock
+# Register traps at SCRIPT scope (not inside a function). In zsh, `trap ... EXIT`
+# inside a function fires when the function returns — not when the script exits.
+# Registering here ensures the cleanup only runs at real script termination.
+trap _cleanup_on_exit EXIT TERM HUP
+trap _on_interrupt INT
+
+# Atomic file copy: write to tempfile in dest dir, then rename into place.
+# Leaves dst untouched if interrupted mid-write. Optional third arg sets mode.
+_atomic_copy() {
+  local src="$1" dst="$2" mode="${3:-}"
+  local dst_dir tmp
+  dst_dir="$(dirname "$dst")"
+  mkdir -p "$dst_dir" 2>/dev/null || true
+  tmp="$(mktemp "${dst_dir}/.macsmith.XXXXXX")" || return 1
+  TMP_FILES+=("$tmp")
+  if ! cp "$src" "$tmp"; then
+    rm -f "$tmp" 2>/dev/null; return 1
+  fi
+  [[ -n "$mode" ]] && chmod "$mode" "$tmp" 2>/dev/null
+  mv -f "$tmp" "$dst" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  return 0
+}
+
+# Atomic write from stdin: content goes to tempfile, then renamed into place.
+_atomic_write() {
+  local dst="$1" mode="${2:-}"
+  local dst_dir tmp
+  dst_dir="$(dirname "$dst")"
+  mkdir -p "$dst_dir" 2>/dev/null || true
+  tmp="$(mktemp "${dst_dir}/.macsmith.XXXXXX")" || return 1
+  TMP_FILES+=("$tmp")
+  if ! cat > "$tmp"; then
+    rm -f "$tmp" 2>/dev/null; return 1
+  fi
+  [[ -n "$mode" ]] && chmod "$mode" "$tmp" 2>/dev/null
+  mv -f "$tmp" "$dst" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  return 0
+}
 
 # Ensure standard Unix tools are in PATH (curl, git, etc.)
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-echo "🚀 macOS Development Environment Setup - Installation"
+echo "🚀 macsmith - Installation"
 echo "======================================================"
 echo ""
 
@@ -132,13 +197,47 @@ _detect_brew_prefix() {
 
 HOMEBREW_PREFIX="$(_detect_brew_prefix)"
 
+# Fresh-install vs upgrade detection
+# Marker file is created at the end of a successful install.
+# Presence = we've installed here before; absence = fresh machine.
+DATA_DIR="$HOME/.local/share/macsmith"
+INSTALL_STATE_FILE="$DATA_DIR/.install-state"
+
+_is_fresh_install() {
+  [[ ! -f "$INSTALL_STATE_FILE" ]]
+}
+
+_mark_install_state() {
+  mkdir -p "$DATA_DIR"
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
+  local version=""
+  if [[ -n "${REPO_ROOT:-}" ]] && [[ -d "$REPO_ROOT/.git" ]] && command -v git >/dev/null 2>&1; then
+    version="$(cd "$REPO_ROOT" && git describe --tags --always 2>/dev/null || echo "")"
+  fi
+  local first_install_at=""
+  if [[ -f "$INSTALL_STATE_FILE" ]]; then
+    first_install_at="$(grep '^first_install_at=' "$INSTALL_STATE_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
+  fi
+  [[ -z "$first_install_at" ]] && first_install_at="$now"
+
+  {
+    printf 'first_install_at=%s\n' "$first_install_at"
+    printf 'last_install_at=%s\n' "$now"
+    printf 'version=%s\n' "$version"
+    printf 'hostname=%s\n' "$(hostname 2>/dev/null || echo unknown)"
+  } > "$INSTALL_STATE_FILE"
+}
+
 # Detect repository root directory (where install.sh is located)
 # This is saved early so it's available even after directory changes
 _detect_repo_root() {
   local repo_root=""
   
-  # Method 1: Use zsh-specific variable (works in zsh)
+  # Method 1: zsh-specific prompt-expansion trick to get the script path
+  # shellcheck disable=SC2296  # ${(%):-%x} is valid zsh, not bash
   if [[ -n "${(%):-%x}" ]]; then
+    # shellcheck disable=SC2296
     repo_root="$(cd "$(dirname "${(%):-%x}")" && pwd)" 2>/dev/null || repo_root=""
   fi
   
@@ -149,13 +248,13 @@ _detect_repo_root() {
     fi
   fi
   
-  # Method 3: Search from current directory up for maintain-system.sh
-  if [[ -z "$repo_root" ]] || [[ ! -f "$repo_root/maintain-system.sh" ]]; then
+  # Method 3: Search from current directory up for macsmith.sh
+  if [[ -z "$repo_root" ]] || [[ ! -f "$repo_root/macsmith.sh" ]]; then
     local search_dir="$(pwd)"
     local max_iterations=50
     local iteration=0
     while [[ "$search_dir" != "/" ]] && [[ $iteration -lt $max_iterations ]]; do
-      if [[ -f "$search_dir/maintain-system.sh" ]]; then
+      if [[ -f "$search_dir/macsmith.sh" ]]; then
         repo_root="$search_dir"
         break
       fi
@@ -281,18 +380,33 @@ install_oh_my_zsh() {
   fi
 }
 
-# Function to install Powerlevel10k theme
-install_powerlevel10k() {
-  local p10k_dir="$HOME/.oh-my-zsh/custom/themes/powerlevel10k"
-  if [[ ! -d "$p10k_dir" ]]; then
-    echo "${YELLOW}📦 Installing Powerlevel10k theme...${NC}"
-    if git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$p10k_dir"; then
-      echo "${GREEN}✅ Powerlevel10k installed${NC}"
+# Function to install Starship prompt
+install_starship() {
+  HOMEBREW_PREFIX="$(_detect_brew_prefix)"
+
+  if command -v starship >/dev/null 2>&1; then
+    echo "${GREEN}✅ Starship already installed${NC}"
+  elif [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
+    echo "${YELLOW}📦 Installing Starship prompt via Homebrew...${NC}"
+    if "$HOMEBREW_PREFIX/bin/brew" install starship; then
+      echo "${GREEN}✅ Starship installed${NC}"
     else
-      warn "Powerlevel10k installation failed"
+      warn "Starship installation failed (try: brew install starship)"
+      return 1
     fi
   else
-    echo "${GREEN}✅ Powerlevel10k already installed${NC}"
+    warn "Starship requires Homebrew. Install Homebrew first, then: brew install starship"
+    return 1
+  fi
+
+  # Install default Starship config if the user doesn't already have one
+  local starship_config="${XDG_CONFIG_HOME:-$HOME/.config}/starship.toml"
+  if [[ ! -f "$starship_config" ]] && [[ -n "$REPO_ROOT" ]] && [[ -f "$REPO_ROOT/config/starship.toml" ]]; then
+    if _atomic_copy "$REPO_ROOT/config/starship.toml" "$starship_config"; then
+      echo "  ${BLUE}INFO:${NC} Default Starship config installed at $starship_config"
+    else
+      warn "Failed to install default Starship config at $starship_config"
+    fi
   fi
 }
 
@@ -615,61 +729,73 @@ install_nix() {
   fi
 }
 
-# Function to setup maintain-system script
-setup_maintain_system() {
+# Function to setup macsmith script
+setup_macsmith() {
   local local_bin="$HOME/.local/bin"
 
-  echo "${YELLOW}📦 Setting up maintain-system script...${NC}"
+  echo "${YELLOW}📦 Setting up macsmith script...${NC}"
   mkdir -p "$local_bin"
   
   # Use REPO_ROOT that was detected at script start
-  # If REPO_ROOT is not set or maintain-system.sh not found there, try to detect again
+  # If REPO_ROOT is not set or macsmith.sh not found there, try to detect again
   local script_dir="$REPO_ROOT"
   
-  if [[ -z "$script_dir" ]] || [[ ! -f "$script_dir/maintain-system.sh" ]]; then
+  if [[ -z "$script_dir" ]] || [[ ! -f "$script_dir/macsmith.sh" ]]; then
     # Fallback: try to detect again (in case REPO_ROOT wasn't set correctly)
     script_dir="$(_detect_repo_root)"
   fi
   
   # Final check and installation
-  if [[ -n "$script_dir" ]] && [[ -f "$script_dir/maintain-system.sh" ]]; then
-    cp "$script_dir/maintain-system.sh" "$local_bin/maintain-system"
-    chmod +x "$local_bin/maintain-system"
+  if [[ -n "$script_dir" ]] && [[ -f "$script_dir/macsmith.sh" ]]; then
+    # Atomic so Ctrl-C during copy leaves old binary intact (or absent, never partial)
+    if ! _atomic_copy "$script_dir/macsmith.sh" "$local_bin/macsmith" 755; then
+      echo "${RED}❌ Failed to install macsmith${NC}"
+      exit 1
+    fi
     
     # Store version and script files for self-update
-    local data_dir="$HOME/.local/share/macos-dev-setup"
+    local data_dir="$HOME/.local/share/macsmith"
     mkdir -p "$data_dir"
 
-    # Detect current version from git tags or GitHub API
+    # Detect current version. Order:
+    #   1. Shipped VERSION file (release pipeline writes resolved tag here —
+    #      authoritative for release zips).
+    #   2. git describe (local clone of the repo).
+    #   3. Nothing. We refuse to guess from GitHub "latest" because if the
+    #      user is installing an OLDER release zip or an unknown copy, writing
+    #      "latest" here makes `upgrade`/update notifications lie. Instead
+    #      write a literal "unknown" marker so behaviour is transparent.
     local current_version=""
-    if [[ -d "$script_dir/.git" ]] && command -v git >/dev/null 2>&1; then
+    if [[ -f "$script_dir/VERSION" ]]; then
+      current_version="$(head -n1 "$script_dir/VERSION" 2>/dev/null | tr -d '[:space:]')"
+    fi
+    if [[ -z "$current_version" ]] && [[ -d "$script_dir/.git" ]] && command -v git >/dev/null 2>&1; then
       current_version="$(cd "$script_dir" && git describe --tags --always 2>/dev/null || echo "")"
     fi
     if [[ -z "$current_version" ]]; then
-      # Fallback: query GitHub API for latest release tag
-      current_version="$(curl -s --max-time 5 https://api.github.com/repos/26zl/MacOS-Dev-Setup/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' || echo "")"
+      current_version="unknown"
+      echo "  ${YELLOW}⚠️  No VERSION file and no .git found.${NC} Version recorded as 'unknown'."
+      echo "     'upgrade' will still work (it queries GitHub directly); notifications just won't compare."
     fi
-    if [[ -n "$current_version" ]]; then
-      echo "$current_version" > "$data_dir/version"
-    fi
+    echo "$current_version" > "$data_dir/version"
 
     # Copy scripts to data dir for reference
-    for script_file in install.sh dev-tools.sh bootstrap.sh zsh.sh maintain-system.sh; do
+    for script_file in install.sh dev-tools.sh bootstrap.sh zsh.sh macsmith.sh; do
       [[ -f "$script_dir/$script_file" ]] && cp "$script_dir/$script_file" "$data_dir/$script_file"
     done
 
     # Verify installation
-    if [[ -x "$local_bin/maintain-system" ]]; then
+    if [[ -x "$local_bin/macsmith" ]]; then
       # Normalize path for display (remove ../ if present)
-      local display_path="$local_bin/maintain-system"
-      [[ "$display_path" == *"/../"* ]] && display_path="$(cd "$local_bin" && pwd)/maintain-system"
-      echo "${GREEN}✅ maintain-system script installed to $display_path${NC}"
+      local display_path="$local_bin/macsmith"
+      [[ "$display_path" == *"/../"* ]] && display_path="$(cd "$local_bin" && pwd)/macsmith"
+      echo "${GREEN}✅ macsmith script installed to $display_path${NC}"
     else
-      echo "${RED}❌ Error: maintain-system was copied but is not executable${NC}"
+      echo "${RED}❌ Error: macsmith was copied but is not executable${NC}"
       exit 1
     fi
   else
-    echo "${RED}❌ Error: maintain-system.sh not found${NC}"
+    echo "${RED}❌ Error: macsmith.sh not found${NC}"
     echo "  REPO_ROOT: ${REPO_ROOT:-not set}"
     echo "  Searched in: $script_dir"
     echo "  Current directory: $(pwd)"
@@ -724,23 +850,25 @@ setup_zprofile_path_cleanup() {
     return 0
   fi
   
-  # Backup .zprofile if it exists
+  # Backup .zprofile if it exists (timestamped; non-atomic but harmless — if
+  # the backup itself is interrupted we simply won't overwrite the original)
+  local zprofile_existing=""
   if [[ -f "$HOME/.zprofile" ]]; then
     local zprofile_backup="$HOME/.zprofile.backup.$(date +%Y%m%d_%H%M%S)"
     cp "$HOME/.zprofile" "$zprofile_backup"
     echo "  ${BLUE}INFO:${NC} Backed up existing .zprofile to $zprofile_backup"
+    zprofile_existing="$(cat "$HOME/.zprofile")"
   fi
-  
-  # Ensure .zprofile exists (create empty file if it doesn't exist)
-  touch "$HOME/.zprofile"
-  
-  # Append PATH cleanup to .zprofile
-  cat >> "$HOME/.zprofile" << 'ZPROFILE_EOF'
+
+  # Build new .zprofile content in memory (existing + appended block) so the
+  # write itself is atomic. Ctrl-C mid-heredoc won't corrupt .zprofile.
+  local zprofile_block
+  zprofile_block="$(cat << 'ZPROFILE_EOF'
 
 # ================================ FINAL PATH CLEANUP (FOR .ZPROFILE) =======================
 # This must be at the very end of .zprofile to fix PATH order after all tools have loaded
 # Ensures Homebrew paths come before /usr/bin and ~/.local/bin is included
-# Managed by macOS Development Environment Setup
+# Managed by macsmith
 _detect_brew_prefix() {
   if [[ -d /opt/homebrew ]]; then
     echo /opt/homebrew
@@ -757,8 +885,7 @@ local_bin="$HOME/.local/bin"
 HOMEBREW_PREFIX="$(_detect_brew_prefix)"
 if [[ -n "$HOMEBREW_PREFIX" ]]; then
   # Remove Homebrew paths from current PATH temporarily
-  # Suppress all output to avoid Powerlevel10k instant prompt warnings
-  # Use command grouping to avoid variable output
+  # Use command grouping to avoid stray variable output
   {
     cleaned_path=$(echo "$PATH" | tr ':' '\n' | grep -v "^$HOMEBREW_PREFIX/bin$" | grep -v "^$HOMEBREW_PREFIX/sbin$" | grep -v "^$local_bin$" | tr '\n' ':' | sed 's/:$//' 2>/dev/null)
     # Rebuild PATH with Homebrew first, then ~/.local/bin, then others, then system paths
@@ -799,15 +926,133 @@ if [[ -n "$HOMEBREW_PREFIX" ]]; then
   } >/dev/null 2>&1
 fi
 ZPROFILE_EOF
+)"
+
+  if ! printf '%s\n%s\n' "$zprofile_existing" "$zprofile_block" | _atomic_write "$HOME/.zprofile"; then
+    echo "${RED}❌ Failed to write ~/.zprofile${NC}"
+    return 1
+  fi
 
   echo "${GREEN}✅ PATH cleanup configured in .zprofile${NC}"
+}
+
+# Function to install sysadmin/power-user/netsec/devops tools via Homebrew.
+# Split into profile-based batches so the user can opt in/out per profile.
+# In CI/non-interactive mode, all profiles are installed (answers "yes").
+install_sysadmin_tools() {
+  HOMEBREW_PREFIX="$(_detect_brew_prefix)"
+  if [[ -z "$HOMEBREW_PREFIX" ]] || [[ ! -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
+    warn "Sysadmin tools require Homebrew (skipping)"
+    return 0
+  fi
+  local brew="$HOMEBREW_PREFIX/bin/brew"
+
+  # Power-user CLI utilities. Small, fast, useful for everyone.
+  local poweruser=(
+    btop ncdu dust duf
+    ripgrep bat eza fd zoxide
+    jq yq tree tldr watch
+    gh lazygit
+    mtr bandwhich
+    direnv shellcheck shfmt pre-commit
+    tmux neovim
+    chezmoi
+  )
+
+  # Crypto & secrets tooling.
+  local crypto_formulae=(age sops gnupg pinentry-mac)
+  local crypto_casks=(1password-cli)
+
+  # Network & security tooling. Core items only; password crackers and
+  # wireless attack tools deliberately omitted (very specialised).
+  local netsec_formulae=(nmap masscan iperf3 nikto sqlmap)
+  local netsec_casks=(wireshark)
+
+  # DevOps / SRE tooling. Free container runtime via colima; OrbStack cask
+  # as a fast proprietary alternative to Docker Desktop.
+  local devops_formulae=(
+    # k8s
+    kubernetes-cli helm k9s kubectx kustomize stern
+    # IaC
+    terraform terragrunt tflint ansible
+    # Cloud CLIs
+    awscli azure-cli doctl
+    # GitOps / CI
+    argocd skaffold
+    # Container runtime (colima) + docker CLI
+    colima docker docker-compose
+  )
+  local devops_casks=(google-cloud-sdk orbstack multipass)
+
+  # Helpers: install each package individually so one failure doesn't abort the batch
+  _brew_batch() {
+    local label="$1"; shift
+    local failed=()
+    local pkg
+    for pkg in "$@"; do
+      if "$brew" list --formula "$pkg" >/dev/null 2>&1; then
+        continue
+      fi
+      echo "  installing $pkg..."
+      if ! "$brew" install "$pkg" >/dev/null 2>&1; then
+        failed+=("$pkg")
+      fi
+    done
+    if (( ${#failed[@]} > 0 )); then
+      warn "$label: failed to install: ${failed[*]}"
+    fi
+  }
+
+  _brew_batch_cask() {
+    local label="$1"; shift
+    local failed=()
+    local pkg
+    for pkg in "$@"; do
+      if "$brew" list --cask "$pkg" >/dev/null 2>&1; then
+        continue
+      fi
+      echo "  installing $pkg (cask)..."
+      if ! "$brew" install --cask "$pkg" >/dev/null 2>&1; then
+        failed+=("$pkg")
+      fi
+    done
+    if (( ${#failed[@]} > 0 )); then
+      warn "$label: failed to install: ${failed[*]}"
+    fi
+  }
+
+  echo ""
+  echo "${BLUE}=== Extra tooling (profiles) ===${NC}"
+
+  if _ask_user "${YELLOW}📦 Install power-user CLI (btop, gh, lazygit, ripgrep, bat, jq, chezmoi, neovim, ...)?" "Y"; then
+    _brew_batch "power-user" "${poweruser[@]}"
+    echo "${GREEN}✅ Power-user tools installed${NC}"
+  fi
+
+  if _ask_user "${YELLOW}📦 Install crypto/secrets tools (age, sops, gnupg, 1password-cli)?" "Y"; then
+    _brew_batch "crypto" "${crypto_formulae[@]}"
+    _brew_batch_cask "crypto-casks" "${crypto_casks[@]}"
+    echo "${GREEN}✅ Crypto/secrets tools installed${NC}"
+  fi
+
+  if _ask_user "${YELLOW}📦 Install network/security tools (nmap, wireshark, masscan, hashcat, sqlmap, ...)?" "N"; then
+    _brew_batch "netsec" "${netsec_formulae[@]}"
+    _brew_batch_cask "netsec-casks" "${netsec_casks[@]}"
+    echo "${GREEN}✅ Network/security tools installed${NC}"
+  fi
+
+  if _ask_user "${YELLOW}📦 Install DevOps/SRE tools (kubectl, terraform, ansible, awscli, gcloud, k9s, ...)?" "N"; then
+    _brew_batch "devops" "${devops_formulae[@]}"
+    _brew_batch_cask "devops-casks" "${devops_casks[@]}"
+    echo "${GREEN}✅ DevOps/SRE tools installed${NC}"
+  fi
 }
 
 # Function to backup and install zsh config
 install_zsh_config() {
   local zshrc_backup="$HOME/.zshrc.backup.$(date +%Y%m%d_%H%M%S)"
   local user_customizations=""
-  local MANAGED_MARKER="# Managed by macOS Development Environment Setup"
+  local MANAGED_MARKER="# Managed by macsmith"
 
   # Use REPO_ROOT that was detected at script start
   local script_dir="$REPO_ROOT"
@@ -832,23 +1077,95 @@ install_zsh_config() {
     echo "${YELLOW}📦 Backing up existing .zshrc to $zshrc_backup...${NC}"
     cp "$HOME/.zshrc" "$zshrc_backup"
     echo "${GREEN}✅ Backup created${NC}"
+
+    # Alias/export harvest: on fresh installs, pull user-defined aliases and
+    # exports from the old .zshrc into ~/.zshrc.local so they survive the
+    # overwrite. Managed config lines (starting with our marker or obvious
+    # OMZ boilerplate) are skipped. Only runs if no marker existed AND
+    # ~/.zshrc.local has never been harvested, to avoid appending duplicates
+    # on a crashed-then-rerun install.
+    local _already_harvested=false
+    if [[ -f "$HOME/.zshrc.local" ]] && grep -q '^# Harvested from ' "$HOME/.zshrc.local" 2>/dev/null; then
+      _already_harvested=true
+    fi
+    if _is_fresh_install && [[ -z "$user_customizations" ]] && [[ "$_already_harvested" == false ]]; then
+      local harvest_tmp harvest_sensitive
+      harvest_tmp="$(mktemp)" 2>/dev/null || harvest_tmp="/tmp/zshrc-harvest-$$"
+      harvest_sensitive="$(mktemp)" 2>/dev/null || harvest_sensitive="/tmp/zshrc-harvest-sensitive-$$"
+
+      # Start by collecting user-defined alias/export lines and dropping
+      # ones that match the config we're about to install (avoid duplicates).
+      # shellcheck disable=SC2016
+      local harvest_all
+      harvest_all="$(mktemp)" 2>/dev/null || harvest_all="/tmp/zshrc-harvest-all-$$"
+      grep -E '^\s*(alias |export )' "$HOME/.zshrc" 2>/dev/null \
+        | grep -vE '^\s*export (ZSH|ZSH_THEME|plugins|PATH|NVM_DIR|PYENV_ROOT|GEM_HOME|GEM_PATH|PIPX_DEFAULT_PYTHON|HOMEBREW_PREFIX)=' \
+        | grep -vE "alias (ls|myip|flushdns|reloadzsh|reload|change|mysqlstart|mysqlstop|mysqlstatus|mysqlrestart|mysqlconnect|update|verify|versions|upgrade|sys-install|dev-tools)=" \
+        > "$harvest_all" 2>/dev/null || true
+
+      # Split: anything that looks secret-shaped (TOKEN / SECRET / PASSWORD /
+      # API*KEY / PRIVATE / CREDENTIAL / SESSION / _KEY=) goes to a separate
+      # bucket so we never silently duplicate credentials into .zshrc.local.
+      # The user can still recover them from the timestamped backup if needed.
+      if [[ -s "$harvest_all" ]]; then
+        # Specific compound patterns only. Bare `_KEY` would false-positive on
+        # PATH_KEY / HOTKEY / HOMEBREW_KEY-style benign names.
+        local sensitive_re='export\s+[A-Za-z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|APIKEY|PRIVATE[_-]?KEY|PRIVATE[_-]?TOKEN|ACCESS[_-]?KEY|SECRET[_-]?KEY|SSH[_-]?KEY|GPG[_-]?KEY|SIGNING[_-]?KEY|ENCRYPTION[_-]?KEY|SESSION[_-]?KEY|BEARER|CREDENTIAL)[A-Za-z0-9_]*='
+        grep -iE "$sensitive_re" "$harvest_all" > "$harvest_sensitive" 2>/dev/null || true
+        grep -ivE "$sensitive_re" "$harvest_all" > "$harvest_tmp" 2>/dev/null || true
+      fi
+
+      if [[ -s "$harvest_tmp" ]]; then
+        local zshrc_local="$HOME/.zshrc.local"
+        {
+          printf '# Harvested from %s on %s\n' "$zshrc_backup" "$(date)"
+          printf '# These are aliases/exports from your previous .zshrc that were not\n'
+          printf '# recognised as managed by macsmith. Review and edit freely.\n'
+          printf '# (Secret-shaped exports were intentionally excluded — see %s\n' "$zshrc_backup"
+          printf '#  if you need to manually move any token/key/password exports.)\n\n'
+          cat "$harvest_tmp"
+        } >> "$zshrc_local"
+        echo "  ${BLUE}INFO:${NC} Harvested custom aliases/exports into $zshrc_local"
+        echo "  ${BLUE}INFO:${NC} This file is sourced automatically at the end of .zshrc"
+      fi
+
+      if [[ -s "$harvest_sensitive" ]]; then
+        local skipped_count
+        skipped_count="$(wc -l < "$harvest_sensitive" | tr -d ' ')"
+        echo "  ${YELLOW}⚠️  $skipped_count secret-shaped export line(s) were NOT harvested${NC}"
+        echo "     (names matched TOKEN/SECRET/KEY/PASSWORD/CREDENTIAL/etc.)"
+        echo "     They remain only in the backup: $zshrc_backup"
+        echo "     Review and manually move them into a password manager or ~/.zshrc.local if needed."
+      fi
+
+      rm -f "$harvest_tmp" "$harvest_sensitive" "$harvest_all" 2>/dev/null || true
+    fi
   fi
 
   echo "${YELLOW}📦 Installing zsh configuration...${NC}"
-  cp "$script_dir/zsh.sh" "$HOME/.zshrc"
-
-  # Append user customizations marker and any previously saved customizations
+  # Build the full .zshrc content in memory, then write atomically so Ctrl-C
+  # can't leave a half-written shell config.
+  local zshrc_content
+  zshrc_content="$(cat "$script_dir/zsh.sh")"
   if [[ -n "$user_customizations" ]]; then
-    echo "" >> "$HOME/.zshrc"
-    print -r -- "$user_customizations" >> "$HOME/.zshrc"
+    zshrc_content+="
+"
+    zshrc_content+="$user_customizations"
+  else
+    zshrc_content+="
+
+# USER CUSTOMIZATIONS
+# Add your personal shell customizations below this line.
+# This section is preserved when install.sh re-runs."
+  fi
+  if ! printf '%s\n' "$zshrc_content" | _atomic_write "$HOME/.zshrc"; then
+    echo "${RED}❌ Failed to write ~/.zshrc${NC}"
+    return 1
+  fi
+  if [[ -n "$user_customizations" ]]; then
     echo "${GREEN}✅ zsh configuration installed (user customizations preserved)${NC}"
     echo "  ${BLUE}INFO:${NC} Your custom additions in the '# USER CUSTOMIZATIONS' section were kept"
   else
-    echo "" >> "$HOME/.zshrc"
-    echo "" >> "$HOME/.zshrc"
-    echo "# USER CUSTOMIZATIONS" >> "$HOME/.zshrc"
-    echo "# Add your personal shell customizations below this line." >> "$HOME/.zshrc"
-    echo "# This section is preserved when install.sh re-runs." >> "$HOME/.zshrc"
     echo "${GREEN}✅ zsh configuration installed${NC}"
     echo "  ${BLUE}INFO:${NC} Add personal customizations below '# USER CUSTOMIZATIONS' in ~/.zshrc"
     echo "  ${BLUE}INFO:${NC} That section is preserved if you re-run install.sh"
@@ -906,13 +1223,13 @@ refresh_environment() {
     fi
   fi
   
-  # Check maintain-system
-  if ! command -v maintain-system >/dev/null 2>&1; then
-    local maintain_system_path="$local_bin/maintain-system"
-    if [[ -x "$maintain_system_path" ]]; then
+  # Check macsmith
+  if ! command -v macsmith >/dev/null 2>&1; then
+    local macsmith_path="$local_bin/macsmith"
+    if [[ -x "$macsmith_path" ]]; then
       # It exists but isn't in PATH yet - PATH should have been updated above
       # Just verify it's accessible
-      if [[ -x "$maintain_system_path" ]]; then
+      if [[ -x "$macsmith_path" ]]; then
         : # Command exists, PATH should work now
       fi
     fi
@@ -926,7 +1243,7 @@ refresh_environment() {
     if command -v brew >/dev/null 2>&1; then
       ((verified++))
     fi
-    if command -v maintain-system >/dev/null 2>&1 || [[ -x "$local_bin/maintain-system" ]]; then
+    if command -v macsmith >/dev/null 2>&1 || [[ -x "$local_bin/macsmith" ]]; then
       ((verified++))
     fi
     if [[ $verified -gt 0 ]]; then
@@ -938,27 +1255,42 @@ refresh_environment() {
 # Main installation
 main() {
   echo ""
+  if _is_fresh_install; then
+    echo "${BLUE}Mode: fresh install${NC} (no prior state marker found at $INSTALL_STATE_FILE)"
+  else
+    echo "${BLUE}Mode: upgrade${NC} (existing install detected)"
+    if [[ -f "$INSTALL_STATE_FILE" ]]; then
+      local last_install
+      last_install="$(grep '^last_install_at=' "$INSTALL_STATE_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
+      [[ -n "$last_install" ]] && echo "  ${BLUE}INFO:${NC} Last install: $last_install"
+    fi
+  fi
+  echo ""
   echo "Starting installation..."
   echo ""
-  
+
   # Critical installations (must succeed)
   if ! install_xcode_clt; then echo "${RED}❌ Critical: Xcode Command Line Tools installation failed${NC}"; exit 1; fi
   if ! install_homebrew; then echo "${RED}❌ Critical: Homebrew installation failed${NC}"; exit 1; fi
-  if ! setup_maintain_system; then echo "${RED}❌ Critical: maintain-system script installation failed${NC}"; exit 1; fi
+  if ! setup_macsmith; then echo "${RED}❌ Critical: macsmith script installation failed${NC}"; exit 1; fi
   if ! setup_zprofile_path_cleanup; then echo "${RED}❌ Critical: PATH cleanup setup failed${NC}"; exit 1; fi
   if ! install_zsh_config; then echo "${RED}❌ Critical: zsh configuration installation failed${NC}"; exit 1; fi
   if ! refresh_environment; then echo "${RED}❌ Critical: Environment refresh failed${NC}"; exit 1; fi
 
   # Optional installations (can fail)
   install_oh_my_zsh || warn "Oh My Zsh installation failed"
-  install_powerlevel10k || warn "Powerlevel10k installation failed"
+  install_starship || warn "Starship prompt installation failed"
   install_zsh_plugins || warn "ZSH plugins installation failed"
   install_fzf || warn "FZF installation failed"
   install_mas || warn "mas installation failed"
   install_macports || warn "MacPorts installation failed or was skipped"
   install_nix || warn "Nix installation failed or was skipped"
   setup_nix_path || warn "Nix PATH setup failed"
-  
+  install_sysadmin_tools || warn "Sysadmin tools install had issues"
+
+  # Record that we've completed an install on this machine
+  _mark_install_state || warn "Failed to write install state marker"
+
   echo ""
   if [[ $install_warnings -gt 0 ]]; then
     echo "${YELLOW}⚠️  Installation completed with $install_warnings warning(s)${NC}"
@@ -968,16 +1300,14 @@ main() {
   echo ""
   echo "Next steps:"
   echo "  1. Run: source ~/.zshrc"
-  echo "     (This loads the 'reload' and 'reloadzsh' aliases and other shell configurations)"
-  echo "  2. (Optional) Install development tools:"
-  echo "     - Run './dev-tools.sh' to install language version managers and language runtimes"
-  echo "     - This includes: Conda, pipx, pyenv, nvm, chruby, rustup, swiftly, Go, Java, .NET"
-  echo "  3. Then you can use:"
-  echo "     - reload     : Updates both .zprofile and .zshrc (recommended for full refresh)"
-  echo "     - reloadzsh  : Updates only .zshrc (for quick shell config reload)"
-  echo "  4. Or simply restart your terminal"
-  echo "  5. Run 'p10k configure' to customize your Powerlevel10k theme (optional)"
-  echo "  6. Run 'update' to update all your tools"
+  echo "     (Loads 'reload'/'reloadzsh' aliases and all shell configuration)"
+  echo "  2. (Optional) Install language tools:"
+  echo "     - Run './dev-tools.sh' for Python/Node/Rust/Ruby/Swift/Go/Java/.NET toolchains"
+  echo "  3. Useful commands now available:"
+  echo "     - reload     : Reload both .zprofile and .zshrc"
+  echo "     - reloadzsh  : Reload only .zshrc"
+  echo "  4. Customize the Starship prompt (optional): edit ~/.config/starship.toml"
+  echo "  5. Run 'update' to update all your tools"
   echo ""
   echo "Available commands:"
   echo "  - reload     : Reload both .zprofile and .zshrc (updates PATH and shell config)"
@@ -999,13 +1329,12 @@ main() {
       echo "  ⚠️  brew not found in PATH (may need shell restart)"
     fi
     
-    local local_bin="${XDG_DATA_HOME:-$HOME/.local/share}/../bin"
-    [[ -d "$local_bin" ]] || local_bin="$HOME/.local/bin"
+    local local_bin="$HOME/.local/bin"
     
-    if command -v maintain-system >/dev/null 2>&1 || [[ -x "$local_bin/maintain-system" ]]; then
-      echo "  ✅ maintain-system is available"
+    if command -v macsmith >/dev/null 2>&1 || [[ -x "$local_bin/macsmith" ]]; then
+      echo "  ✅ macsmith is available"
     else
-      echo "  ⚠️  maintain-system not found (may need shell restart)"
+      echo "  ⚠️  macsmith not found (may need shell restart)"
     fi
     
     if command -v port >/dev/null 2>&1; then

@@ -1,0 +1,82 @@
+# Starship default config for macsmith.
+# Run `starship preset --list` and `starship explain` to explore alternatives.
+# Overrides go here or in ~/.config/starship.toml (this file).
+
+format = """
+$username\
+$hostname\
+$directory\
+$git_branch\
+$git_status\
+$nodejs\
+$python\
+$rust\
+$golang\
+$java\
+$ruby\
+$swift\
+$dotnet\
+$kubernetes\
+$terraform\
+$aws\
+$gcloud\
+$azure\
+$docker_context\
+$nix_shell\
+$cmd_duration\
+$line_break\
+$character"""
+
+add_newline = true
+command_timeout = 1000
+
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[❯](bold red)"
+
+[directory]
+truncation_length = 4
+truncate_to_repo = true
+style = "bold cyan"
+
+[git_branch]
+symbol = " "
+style = "bold purple"
+
+[git_status]
+style = "bold yellow"
+
+[cmd_duration]
+min_time = 2000
+format = "took [$duration]($style) "
+style = "yellow"
+
+[kubernetes]
+disabled = false
+format = '[$symbol$context( \($namespace\))]($style) '
+
+[aws]
+format = '[$symbol($profile )(\($region\) )]($style)'
+symbol = "aws "
+
+[gcloud]
+format = '[$symbol$account(@$domain)(\($region\))]($style) '
+disabled = true
+
+[azure]
+disabled = true
+
+[terraform]
+format = "[$symbol$workspace]($style) "
+
+[docker_context]
+only_with_files = true
+
+[nix_shell]
+format = '[$symbol$state( \($name\))]($style) '
+
+[python]
+format = '[${symbol}${pyenv_prefix}(${version} )(\($virtualenv\) )]($style)'
+
+[nodejs]
+format = "[$symbol($version )]($style)"
