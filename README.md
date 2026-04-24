@@ -1,5 +1,17 @@
 # macsmith
 
+```text
+                                                        \ \ \
+                                                         \ \ \
+                                    _ _   _              _\_\_\___
+ _ __ ___   __ _  ___ ___ _ __ ___ (_) |_| |__          |         |
+| '_ ` _ \ / _` |/ __/ __| '_ ` _ \| | __| '_ \         |         |
+| | | | | | (_| | (__\__ \ | | | | | | |_| | | |      **|_________|
+|_| |_| |_|\__,_|\___|___/_| |_| |_|_|\__|_| |_| * * **
+                                                * **  *
+                 ⚒  forge your Mac  ⚒          * *
+```
+
 **Forge a fresh Mac into a complete dev box — and keep it sharp.**
 
 One command installs Homebrew, Starship, language toolchains, and optional sysadmin profiles. A second command (`update`) keeps everything current.

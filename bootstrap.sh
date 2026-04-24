@@ -24,8 +24,23 @@ REPO_URL="${MACSMITH_REPO:-https://github.com/26zl/macsmith.git}"
 REF="${MACSMITH_REF:-main}"
 CLONE_DIR="${TMPDIR:-/tmp}/macsmith-$$"
 
-printf '%b🚀 macsmith%b\n' "$GREEN" "$NC"
-printf '========================================\n\n'
+# Banner — figlet "macsmith" with a claw hammer drawn next to it.
+# Single-quoted heredoc keeps backticks in the figlet art from triggering
+# command substitution.
+printf '%b' "$GREEN"
+cat <<'BANNER'
+
+                                                        \ \ \
+                                                         \ \ \
+                                    _ _   _              _\_\_\___
+ _ __ ___   __ _  ___ ___ _ __ ___ (_) |_| |__          |         |
+| '_ ` _ \ / _` |/ __/ __| '_ ` _ \| | __| '_ \         |         |
+| | | | | | (_| | (__\__ \ | | | | | | |_| | | |      **|_________|
+|_| |_| |_|\__,_|\___|___/_| |_| |_|_|\__|_| |_| * * **
+                                                * **  *
+                 ⚒  forge your Mac  ⚒          * *
+BANNER
+printf '%b\n' "$NC"
 
 printf '%bWhat this will do:%b\n' "$BLUE" "$NC"
 printf '  1. git clone %s (ref: %s) into %s\n' "$REPO_URL" "$REF" "$CLONE_DIR"

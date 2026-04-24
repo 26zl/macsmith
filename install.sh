@@ -91,9 +91,23 @@ _atomic_write() {
 # Ensure standard Unix tools are in PATH (curl, git, etc.)
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-echo "🚀 macsmith - Installation"
-echo "======================================================"
-echo ""
+# Banner — figlet "macsmith" with a claw hammer drawn next to it.
+# Single-quoted heredoc prevents backticks in the figlet art from triggering
+# command substitution.
+printf '\033[0;32m'
+cat <<'BANNER'
+
+                                                        \ \ \
+                                                         \ \ \
+                                    _ _   _              _\_\_\___
+ _ __ ___   __ _  ___ ___ _ __ ___ (_) |_| |__          |         |
+| '_ ` _ \ / _` |/ __/ __| '_ ` _ \| | __| '_ \         |         |
+| | | | | | (_| | (__\__ \ | | | | | | |_| | | |      **|_________|
+|_| |_| |_|\__,_|\___|___/_| |_| |_|_|\__|_| |_| * * **
+                                                * **  *
+                 ⚒  forge your Mac  ⚒          * *
+BANNER
+printf '\033[0m\n'
 
 # Colors for output
 RED='\033[0;31m'
@@ -1224,6 +1238,50 @@ install_sysadmin_tools() {
   fi
 }
 
+# Rotate ~/.zshrc.backup.* files: keep the N most recent AND always keep the
+# oldest non-macsmith-managed backup (the user's original pre-macsmith shell
+# config — critical for uninstall-macsmith to restore). Without this, a new
+# backup accumulates on every install.sh run.
+_rotate_zshrc_backups() {
+  local keep_recent=5
+  # shellcheck disable=SC2012   # backup filenames are timestamp-only; ls+sort is safe
+  local all
+  all="$(ls -1 "$HOME"/.zshrc.backup.* 2>/dev/null | sort)"
+  [[ -z "$all" ]] && return 0
+
+  # Oldest non-macsmith-managed backup — detect by absence of macsmith_bin= signature
+  local oldest_nonmanaged=""
+  local _line
+  while IFS= read -r _line; do
+    [[ -z "$_line" ]] && continue
+    if ! grep -q '^macsmith_bin=' "$_line" 2>/dev/null; then
+      oldest_nonmanaged="$_line"
+      break
+    fi
+  done <<<"$all"
+
+  # The N newest (last N lines of ascending sort)
+  local newest_n
+  newest_n="$(printf '%s\n' "$all" | tail -n "$keep_recent")"
+
+  # Remove everything not in the keep-set
+  local removed=0
+  while IFS= read -r _line; do
+    [[ -z "$_line" ]] && continue
+    [[ "$_line" == "$oldest_nonmanaged" ]] && continue
+    if printf '%s\n' "$newest_n" | grep -Fxq "$_line"; then
+      continue
+    fi
+    if rm -f "$_line" 2>/dev/null; then
+      removed=$((removed + 1))
+    fi
+  done <<<"$all"
+
+  if (( removed > 0 )); then
+    echo "  ${BLUE}INFO:${NC} Rotated $removed old .zshrc backup(s); kept newest $keep_recent + oldest pre-macsmith"
+  fi
+}
+
 # Function to backup and install zsh config
 install_zsh_config() {
   local zshrc_backup="$HOME/.zshrc.backup.$(date +%Y%m%d_%H%M%S)"
@@ -1253,6 +1311,7 @@ install_zsh_config() {
     echo "${YELLOW}📦 Backing up existing .zshrc to $zshrc_backup...${NC}"
     cp "$HOME/.zshrc" "$zshrc_backup"
     echo "${GREEN}✅ Backup created${NC}"
+    _rotate_zshrc_backups
 
     # Alias/export harvest: on fresh installs, pull user-defined aliases and
     # exports from the old .zshrc into ~/.zshrc.local so they survive the

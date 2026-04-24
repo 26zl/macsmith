@@ -90,10 +90,12 @@ _remove_marker_block() {
     # Preserve original file permissions
     orig_perms=$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file" 2>/dev/null || echo "644")
 
-    # Remove lines between markers (inclusive) using awk variables (not inline interpolation)
-    awk '
-        /^# BEGIN Nix macOS Maintenance Hook/ { in_block=1; next }
-        /^# END Nix macOS Maintenance Hook/ { in_block=0; next }
+    # Remove lines between markers (inclusive). Pass the constants as awk vars
+    # so the markers stay in a single source of truth with the declarations at
+    # the top of this file — previously NIX_MARKER_END was unused (SC2034).
+    awk -v start="$NIX_MARKER_START" -v end="$NIX_MARKER_END" '
+        index($0, start) == 1 { in_block=1; next }
+        index($0, end) == 1 { in_block=0; next }
         !in_block { print }
     ' "$file" > "$temp_file"
 
