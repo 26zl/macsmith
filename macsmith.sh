@@ -960,6 +960,143 @@ _cargo_update_packages() {
 # ================================ UPDATE ===================================
 
 update() {
+  # Targeted update dispatch. `update` or `update all` runs the full monolith
+  # below. Specific targets run a minimal "just this tool" path so users can
+  # iterate quickly instead of waiting 5+ min for a full pass. For complex
+  # targets the minimal path does what's useful without re-implementing the
+  # full cleanup/detect logic — use `update` (no arg) when you want the works.
+  local _target="${1:-all}"
+  case "$_target" in
+    all) ;;
+    brew|homebrew)
+      if ! command -v brew >/dev/null 2>&1; then
+        echo "${RED}[Homebrew]${NC} not installed"; return 1
+      fi
+      echo "${GREEN}[Homebrew]${NC} update/upgrade/cleanup..."
+      brew update && brew upgrade && brew cleanup
+      return $?
+      ;;
+    macports)
+      if ! command -v port >/dev/null 2>&1; then
+        echo "${RED}[MacPorts]${NC} not installed"; return 1
+      fi
+      echo "${GREEN}[MacPorts]${NC} selfupdate + upgrade outdated (sudo required)"
+      sudo port selfupdate && sudo port upgrade outdated
+      return $?
+      ;;
+    node|nvm|npm)
+      if ! command -v nvm >/dev/null 2>&1 && [[ ! -s "$HOME/.nvm/nvm.sh" ]]; then
+        echo "${RED}[Node]${NC} nvm not installed"; return 1
+      fi
+      [[ -s "$HOME/.nvm/nvm.sh" ]] && source "$HOME/.nvm/nvm.sh"
+      echo "${GREEN}[Node]${NC} install + use latest LTS, bump npm"
+      nvm install --lts && nvm use --lts && npm install -g npm@latest
+      return $?
+      ;;
+    python|pyenv|pipx|conda)
+      local _py_rc=0
+      if command -v pyenv >/dev/null 2>&1; then
+        echo "${GREEN}[pyenv]${NC} rehash"
+        pyenv rehash || _py_rc=$?
+      fi
+      if command -v pipx >/dev/null 2>&1; then
+        echo "${GREEN}[pipx]${NC} upgrade-all"
+        pipx upgrade-all || _py_rc=$?
+      fi
+      if command -v conda >/dev/null 2>&1; then
+        echo "${GREEN}[conda]${NC} update"
+        conda update -n base -c defaults conda -y || _py_rc=$?
+      fi
+      return $_py_rc
+      ;;
+    ruby|chruby|rubygems|gem)
+      if command -v gem >/dev/null 2>&1; then
+        echo "${GREEN}[RubyGems]${NC} update + cleanup (180s timeout)"
+        perl -e 'alarm shift; exec @ARGV' 180 gem update --silent --no-document && gem cleanup
+        return $?
+      fi
+      echo "${RED}[Ruby]${NC} gem not found"; return 1
+      ;;
+    rust|rustup|cargo)
+      if ! command -v rustup >/dev/null 2>&1; then
+        echo "${RED}[Rust]${NC} rustup not installed"; return 1
+      fi
+      echo "${GREEN}[Rust]${NC} rustup update"
+      rustup update
+      return $?
+      ;;
+    swift|swiftly)
+      if ! command -v swiftly >/dev/null 2>&1; then
+        echo "${RED}[Swift]${NC} swiftly not installed"; return 1
+      fi
+      echo "${GREEN}[Swift]${NC} swiftly self-update + install latest"
+      swiftly self-update && swiftly install latest --use
+      return $?
+      ;;
+    go|golang)
+      if ! command -v brew >/dev/null 2>&1; then
+        echo "${RED}[Go]${NC} brew needed (Go is a brew formula)"; return 1
+      fi
+      echo "${GREEN}[Go]${NC} brew upgrade go"
+      brew upgrade go
+      return $?
+      ;;
+    dotnet|net)
+      if ! command -v dotnet >/dev/null 2>&1; then
+        echo "${RED}[.NET]${NC} dotnet not found"; return 1
+      fi
+      echo "${GREEN}[.NET]${NC} workload update + global tools update"
+      dotnet workload update && dotnet tool update -g --all 2>/dev/null || true
+      return $?
+      ;;
+    nix)
+      if ! command -v nix >/dev/null 2>&1; then
+        echo "${RED}[Nix]${NC} not installed"; return 1
+      fi
+      echo "${GREEN}[Nix]${NC} profile upgrade + gc"
+      nix profile upgrade '.*' 2>/dev/null || nix-env -u '*' 2>/dev/null || true
+      nix-collect-garbage 2>/dev/null || sudo nix-collect-garbage 2>/dev/null || true
+      return 0
+      ;;
+    mas)
+      if ! command -v mas >/dev/null 2>&1; then
+        echo "${RED}[mas]${NC} not installed"; return 1
+      fi
+      echo "${GREEN}[mas]${NC} upgrade"
+      mas upgrade
+      return $?
+      ;;
+    help|-h|--help)
+      cat <<EOF
+Usage: update [target]
+
+Targets:
+  all                 Run the full update (default; Homebrew, all language
+                      runtimes, package managers, version cleanups).
+  brew | homebrew     brew update + upgrade + cleanup
+  macports            sudo port selfupdate + upgrade outdated
+  node | nvm | npm    Install/use latest LTS, bump npm
+  python | pyenv |    pyenv rehash, pipx upgrade-all, conda update
+    pipx | conda
+  ruby | gem          gem update (180s timeout) + gem cleanup
+  rust | rustup       rustup update
+  swift | swiftly     swiftly self-update + install latest
+  go | golang         brew upgrade go
+  dotnet | net        dotnet workload + global tools update
+  nix                 nix profile upgrade + gc
+  mas                 mas upgrade
+  help                This message
+EOF
+      return 0
+      ;;
+    *)
+      echo "${RED}unknown update target:${NC} $_target"
+      echo "Try: update help"
+      return 2
+      ;;
+  esac
+
+  # Full "all" path below — unchanged from prior behaviour.
   _ensure_system_path
   echo "${GREEN}==> Update started $(date)${NC}"
   if [[ -f "$DATA_DIR/version" ]]; then
@@ -1875,7 +2012,10 @@ update() {
       echo "${GREEN}[RubyGems]${NC} Updating and cleaning gems..."
       local gem_update_output=""
       local gem_update_exit_code=0
-      gem_update_output="$(gem update --silent --no-document 2>&1)" || gem_update_exit_code=$?
+      # Timeout via perl (macOS ships it; `timeout` isn't default). Prevents
+      # indefinite hangs when rubygems.org is slow or unresponsive — previously
+      # users had to Ctrl-C the whole `update` run to recover.
+      gem_update_output="$(perl -e 'alarm shift; exec @ARGV' 180 gem update --silent --no-document 2>&1)" || gem_update_exit_code=$?
 
       if [[ $gem_update_exit_code -eq 0 ]]; then
         # Check if output indicates gems were actually updated
@@ -1886,6 +2026,9 @@ update() {
         else
           echo "  ${BLUE}INFO:${NC} Gems checked (may already be up to date)"
         fi
+      elif [[ $gem_update_exit_code -eq 142 ]] || [[ $gem_update_exit_code -eq 14 ]]; then
+        # perl's alarm sends SIGALRM; bash reports 128+14=142 (or 14 as the raw signal)
+        echo "  ${RED}WARNING:${NC} gem update timed out after 180s (network stall?)"
       else
         echo "  ${RED}WARNING:${NC} gem update failed (exit code: $gem_update_exit_code)"
       fi
@@ -1909,22 +2052,30 @@ update() {
     fi
   fi
   
-  # chruby is a shell function, not a command - check if it's available
+  # chruby is a shell function, not a command - check if it's available.
+  # The Homebrew fallback must be at the same level as the other sourcing
+  # attempts; a previous version nested it inside the elif that checks
+  # /usr/local and ~/.local, so brew-installed chruby was never found.
   local chruby_available=false
   if type chruby >/dev/null 2>&1; then
     chruby_available=true
-  elif [[ -f /usr/local/share/chruby/chruby.sh ]] || [[ -f "$HOME/.local/share/chruby/chruby.sh" ]]; then
-    # Try to source chruby if available but not loaded
+  else
     if [[ -f /usr/local/share/chruby/chruby.sh ]]; then
-      source /usr/local/share/chruby/chruby.sh 2>/dev/null && chruby_available=true || true
-    elif [[ -f "$HOME/.local/share/chruby/chruby.sh" ]]; then
-      source "$HOME/.local/share/chruby/chruby.sh" 2>/dev/null && chruby_available=true || true
+      if source /usr/local/share/chruby/chruby.sh 2>/dev/null; then
+        chruby_available=true
+      fi
     fi
-    # Also check Homebrew location
+    if [[ "$chruby_available" != "true" ]] && [[ -f "$HOME/.local/share/chruby/chruby.sh" ]]; then
+      if source "$HOME/.local/share/chruby/chruby.sh" 2>/dev/null; then
+        chruby_available=true
+      fi
+    fi
     if [[ "$chruby_available" != "true" ]] && command -v brew >/dev/null 2>&1; then
       local chruby_path="$(brew --prefix chruby 2>/dev/null || echo "")"
       if [[ -n "$chruby_path" && -f "$chruby_path/share/chruby/chruby.sh" ]]; then
-        source "$chruby_path/share/chruby/chruby.sh" 2>/dev/null && chruby_available=true || true
+        if source "$chruby_path/share/chruby/chruby.sh" 2>/dev/null; then
+          chruby_available=true
+        fi
       fi
     fi
   fi
@@ -2582,10 +2733,17 @@ update() {
 verify() {
   _ensure_system_path || true
   echo "${GREEN}==> Verify $(date)${NC}"
+  # Counters for the summary line printed at the very end. The existing
+  # per-tool output is unchanged — this is purely additive so users get a
+  # "tl;dr" without scrolling through 30+ lines.
+  local _verify_ok=0
+  local _verify_warn=0
+  local _verify_miss=0
+  local _verify_missing=()
   local ok warn miss
-  ok()   { printf "%-15s OK (%s)\n" "$1" "$2"; }
-  warn() { printf "%-15s ${RED}WARN${NC} (%s)\n" "$1" "$2"; }
-  miss() { printf "%-15s Not installed\n" "$1"; }
+  ok()   { printf "%-15s OK (%s)\n" "$1" "$2"; ((_verify_ok++)) || true; }
+  warn() { printf "%-15s ${RED}WARN${NC} (%s)\n" "$1" "$2"; ((_verify_warn++)) || true; }
+  miss() { printf "%-15s Not installed\n" "$1"; ((_verify_miss++)) || true; _verify_missing+=("$1"); }
 
   if command -v ruby >/dev/null 2>&1; then
     ok "Ruby" "$(ruby -v)"
@@ -2986,6 +3144,20 @@ verify() {
   done
   unset _tool
 
+  # One-line summary so users don't have to scroll the list to see overall status
+  local _verify_total=$((_verify_ok + _verify_warn + _verify_miss))
+  echo ""
+  if (( _verify_miss == 0 && _verify_warn == 0 )); then
+    echo "${GREEN}Summary: $_verify_ok/$_verify_total tools OK${NC}"
+  else
+    printf "Summary: %d/%d OK" "$_verify_ok" "$_verify_total"
+    (( _verify_warn > 0 )) && printf ", %d warning(s)" "$_verify_warn"
+    (( _verify_miss > 0 )) && printf ", %d missing" "$_verify_miss"
+    printf "\n"
+    if (( _verify_miss > 0 )); then
+      echo "Missing: ${_verify_missing[*]}"
+    fi
+  fi
   echo "${GREEN}==> Verify done${NC}"
   return 0
 }
@@ -3584,13 +3756,46 @@ _self_upgrade() {
     fi
   fi
 
-  # Copy scripts to data dir
+  # Copy top-level scripts to data dir
   mkdir -p "$DATA_DIR"
   for script_file in install.sh dev-tools.sh bootstrap.sh zsh.sh macsmith.sh; do
     if [[ -f "$extract_dir/$script_file" ]]; then
       cp "$extract_dir/$script_file" "$DATA_DIR/$script_file" || true
     fi
   done
+
+  # Mirror scripts/ helpers AND refresh their ~/.local/bin/ shims in-place.
+  # Without this, existing users can't pick up new helpers (uninstall-nix,
+  # uninstall-macsmith) via `upgrade` — only fresh sys-install would deliver
+  # them. Helpers are small; overwriting is safe.
+  if [[ -d "$extract_dir/scripts" ]]; then
+    mkdir -p "$DATA_DIR/scripts"
+    local _helper
+    for _helper in nix-macos-maintenance.sh uninstall-nix-macos.sh uninstall-macsmith.sh; do
+      if [[ -f "$extract_dir/scripts/$_helper" ]]; then
+        cp "$extract_dir/scripts/$_helper" "$DATA_DIR/scripts/$_helper" || true
+      fi
+    done
+    # Refresh the installed-bin shims. Drop the trailing .sh when placing.
+    local _bin
+    local _local_bin="$HOME/.local/bin"
+    mkdir -p "$_local_bin"
+    for _bin in uninstall-nix-macos uninstall-macsmith; do
+      if [[ -f "$extract_dir/scripts/$_bin.sh" ]]; then
+        # Atomic-ish: write to tempfile next to target, chmod, mv over.
+        local _tmp="$_local_bin/.$_bin.$$.tmp"
+        if cp "$extract_dir/scripts/$_bin.sh" "$_tmp" \
+           && chmod 755 "$_tmp" \
+           && mv -f "$_tmp" "$_local_bin/$_bin"; then
+          echo "  refreshed $_local_bin/$_bin"
+        else
+          rm -f "$_tmp" 2>/dev/null || true
+          echo "  ${YELLOW}WARN:${NC} failed to refresh $_local_bin/$_bin"
+        fi
+      fi
+    done
+    unset _helper _bin _tmp _local_bin
+  fi
 
   # Cleanup temp dir
   rm -rf "$tmp_dir"
@@ -3614,6 +3819,231 @@ _self_upgrade() {
   echo "  Restart your terminal to apply changes."
 }
 
+# ================================ DOCTOR ===================================
+# Diagnostic command for "my setup feels off" situations. Scans for the known
+# failure modes we've hit in the wild and prints prioritised findings with
+# actionable remediations. Read-only — never modifies anything.
+doctor() {
+  local issues=0
+  local warnings=0
+
+  _doctor_issue() { echo "${RED}✗${NC} $*"; ((issues++)) || true; }
+  _doctor_warn()  { echo "${YELLOW}!${NC} $*"; ((warnings++)) || true; }
+  _doctor_ok()    { echo "${GREEN}✓${NC} $*"; }
+
+  echo "${GREEN}==> Doctor: scanning your setup${NC}"
+  echo ""
+
+  # 1. Homebrew on PATH
+  if command -v brew >/dev/null 2>&1; then
+    _doctor_ok "Homebrew is on PATH ($(command -v brew))"
+  else
+    _doctor_issue "Homebrew not found on PATH — run 'sys-install' to install"
+  fi
+
+  # 2. Partial Nix install (/nix dir without nix binary)
+  if [[ -d /nix ]] && ! command -v nix >/dev/null 2>&1 && [[ ! -f /nix/var/nix/profiles/default/bin/nix ]]; then
+    _doctor_issue "/nix exists but no Nix binary — run 'uninstall-nix' to clean up"
+  fi
+
+  # 3. Duplicate Starship installs (brew + non-brew).
+  # zsh's `command -v` doesn't support -a (bash extension), so listing all
+  # matches needs zsh-native `whence -pa` — which macsmith.sh is always run
+  # under (the shebang pins zsh). Previously `command -v -a` was silenced by
+  # 2>/dev/null, making this check a no-op.
+  if command -v starship >/dev/null 2>&1; then
+    local starship_paths
+    starship_paths="$(whence -pa starship 2>/dev/null | sort -u)"
+    local starship_count
+    starship_count="$(printf '%s\n' "$starship_paths" | grep -c . || true)"
+    if (( starship_count > 1 )); then
+      _doctor_warn "Multiple starship binaries found; 'update' only manages the brew one:"
+      printf '%s\n' "$starship_paths" | sed 's/^/    /'
+      echo "    Keep: $(command -v starship)"
+      echo "    Remove others with: sudo rm <path>"
+    fi
+  fi
+
+  # 4. macsmith managed zshrc sanity — zsh.sh itself doesn't carry a marker,
+  # so we probe for a signature line instead (the alias-setup block that
+  # only macsmith's zsh.sh writes).
+  if [[ -f "$HOME/.zshrc" ]]; then
+    if grep -q '^macsmith_bin=' "$HOME/.zshrc" 2>/dev/null; then
+      _doctor_ok "\$HOME/.zshrc is macsmith-managed"
+    else
+      _doctor_warn "\$HOME/.zshrc is not macsmith-managed — your shell may be missing aliases"
+      echo "    Fix: sys-install  (backs up current .zshrc first)"
+    fi
+  fi
+
+  # 5. ~/.local/bin on PATH (displayed paths use \$HOME to avoid tilde-quote warning)
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*)
+      _doctor_ok "\$HOME/.local/bin is on PATH"
+      ;;
+    *)
+      _doctor_issue "\$HOME/.local/bin is NOT on PATH — macsmith + uninstallers won't be found"
+      echo "    Fix: sys-install  (rewrites .zprofile PATH block)"
+      ;;
+  esac
+
+  # 6. chruby active but no Ruby?
+  if type chruby >/dev/null 2>&1 && ! command -v ruby >/dev/null 2>&1; then
+    _doctor_issue "chruby loaded but no Ruby available — run 'update ruby' or 'dev-tools'"
+  fi
+
+  # 7. Install-state marker sanity
+  if [[ -f "$DATA_DIR/.install-state" ]]; then
+    _doctor_ok "install-state marker present"
+  else
+    _doctor_warn "No install-state marker ($DATA_DIR/.install-state)"
+    echo "    Not fatal; 'sys-install' recreates it."
+  fi
+
+  # 8. Kubernetes context pointing at dead cluster
+  if command -v kubectl >/dev/null 2>&1; then
+    local ctx
+    ctx="$(kubectl config current-context 2>/dev/null || true)"
+    if [[ -n "$ctx" ]] && ! kubectl --request-timeout=2s cluster-info >/dev/null 2>&1; then
+      _doctor_warn "kube-context '$ctx' is set but the cluster is not reachable"
+      echo "    (Causes the k8s indicator to linger in the prompt.)"
+      echo "    Fix: kubectl config unset current-context"
+    fi
+  fi
+
+  # 9. Ancient macsmith (version recorded as 'unknown')
+  if [[ -f "$DATA_DIR/version" ]]; then
+    local ver="$(<"$DATA_DIR/version")"
+    if [[ "$ver" == "unknown" ]]; then
+      _doctor_warn "macsmith version is 'unknown' — run 'upgrade' to pin a real release tag"
+    else
+      _doctor_ok "macsmith version: $ver"
+    fi
+  fi
+
+  echo ""
+  if (( issues == 0 && warnings == 0 )); then
+    echo "${GREEN}All checks passed.${NC}"
+  else
+    printf "Summary: %d issue(s), %d warning(s)\n" "$issues" "$warnings"
+  fi
+  # Exit non-zero only for real issues so scripts can gate on it
+  return $(( issues > 0 ))
+}
+
+# ================================ UNINSTALL-PROFILE ========================
+# brew-uninstall the formulae and casks that install.sh's sysadmin profiles
+# added. Keep these lists in sync with install.sh's install_sysadmin_tools()
+# (no shared source — macsmith runs standalone from ~/.local/bin and can't
+# source the repo's install.sh at runtime).
+uninstall_profile() {
+  local profile="${1:-}"
+  if [[ -z "$profile" ]] || [[ "$profile" == "help" ]] || [[ "$profile" == "-h" ]] || [[ "$profile" == "--help" ]]; then
+    cat <<EOF
+Usage: macsmith uninstall-profile <name>
+
+Valid profiles:
+  power-user   btop, ncdu, dust, duf, ripgrep, bat, eza, fd, zoxide, jq, yq,
+               tree, tldr, watch, gh, lazygit, mtr, bandwhich, direnv,
+               shellcheck, shfmt, pre-commit, tmux, neovim, chezmoi
+  crypto       age, sops, gnupg, pinentry-mac, 1password-cli (cask)
+  netsec       nmap, masscan, iperf3, wireshark-app (cask)
+  devops       kubernetes-cli, helm, k9s, kubectx, kustomize, stern,
+               hashicorp/tap/terraform, terragrunt, tflint, ansible, awscli, azure-cli,
+               doctl, argocd, skaffold, colima, docker, docker-compose,
+               google-cloud-sdk/orbstack/multipass (casks)
+  databases    mysql, postgresql@17
+
+Uninstalls via 'brew uninstall'. Skips formulae that aren't installed.
+Does NOT touch your data (MySQL dumps, postgres clusters, Docker volumes, …).
+EOF
+    return 0
+  fi
+
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "${RED}[error]${NC} Homebrew not available"
+    return 1
+  fi
+
+  local formulae=()
+  local casks=()
+  case "$profile" in
+    power-user)
+      formulae=(btop ncdu dust duf ripgrep bat eza fd zoxide jq yq tree tldr watch gh lazygit mtr bandwhich direnv shellcheck shfmt pre-commit tmux neovim chezmoi)
+      ;;
+    crypto)
+      formulae=(age sops gnupg pinentry-mac)
+      casks=(1password-cli)
+      ;;
+    netsec)
+      formulae=(nmap masscan iperf3)
+      casks=(wireshark-app)
+      ;;
+    devops)
+      formulae=(kubernetes-cli helm k9s kubectx kustomize stern hashicorp/tap/terraform terragrunt tflint ansible awscli azure-cli doctl argocd skaffold colima docker docker-compose)
+      casks=(google-cloud-sdk orbstack multipass)
+      ;;
+    databases)
+      formulae=(mysql postgresql@17)
+      ;;
+    *)
+      echo "${RED}unknown profile:${NC} $profile"
+      echo "Try: macsmith uninstall-profile help"
+      return 2
+      ;;
+  esac
+
+  echo "${YELLOW}About to uninstall $profile profile:${NC}"
+  (( ${#formulae[@]} > 0 )) && echo "  formulae: ${formulae[*]}"
+  (( ${#casks[@]} > 0 )) && echo "  casks:    ${casks[*]}"
+  echo ""
+  printf 'Proceed? [y/N]: '
+  local _reply=""
+  if [[ -r /dev/tty ]]; then
+    IFS= read -r _reply </dev/tty 2>/dev/null || return 1
+  else
+    IFS= read -r _reply || return 1
+  fi
+  [[ "$_reply" =~ ^[Yy]([Ee][Ss])?$ ]] || { echo "cancelled"; return 0; }
+
+  local removed=0
+  local skipped=0
+  local failed=()
+  local pkg
+  for pkg in "${formulae[@]}"; do
+    if brew list --formula "$pkg" >/dev/null 2>&1; then
+      if brew uninstall "$pkg" </dev/null >/dev/null 2>&1; then
+        echo "  removed: $pkg"
+        ((removed++))
+      else
+        failed+=("$pkg")
+      fi
+    else
+      ((skipped++))
+    fi
+  done
+  for pkg in "${casks[@]}"; do
+    if brew list --cask "$pkg" >/dev/null 2>&1; then
+      if brew uninstall --cask "$pkg" </dev/null >/dev/null 2>&1; then
+        echo "  removed: $pkg (cask)"
+        ((removed++))
+      else
+        failed+=("$pkg")
+      fi
+    else
+      ((skipped++))
+    fi
+  done
+
+  echo ""
+  printf "Summary: %d removed, %d were not installed" "$removed" "$skipped"
+  if (( ${#failed[@]} > 0 )); then
+    printf ", %d failed: %s" "${#failed[@]}" "${failed[*]}"
+  fi
+  echo ""
+  return 0
+}
+
 # ================================ MAIN =====================================
 # Concurrent-run protection
 LOCK_FILE="/tmp/macsmith-maintain.lock"
@@ -3630,10 +4060,12 @@ fi
 echo $$ > "$LOCK_FILE"
 trap 'rm -f "$LOCK_FILE"' EXIT INT TERM HUP
 
-# Dispatch based on command argument
+# Dispatch based on command argument. For subcommands that accept arguments
+# (update target, uninstall-profile name), forward "${@:2}" so positional
+# args reach the function.
 case "${1:-}" in
   update)
-    update
+    update "${@:2}"
     ;;
   verify)
     verify || true
@@ -3662,16 +4094,26 @@ case "${1:-}" in
       exit 1
     fi
     ;;
+  doctor)
+    doctor
+    ;;
+  uninstall-profile)
+    uninstall_profile "${@:2}"
+    ;;
   *)
-    echo "Usage: macsmith [update|verify|versions|upgrade|install|dev-tools]"
+    echo "Usage: macsmith <command> [args]"
     echo ""
     echo "Commands:"
-    echo "  update    - Update Homebrew, Python, Node.js, Ruby, Rust, and other tools"
-    echo "  verify    - Verify installed tools and their versions"
-    echo "  versions  - Display detailed version information for all tools"
-    echo "  upgrade   - Update the setup scripts themselves from GitHub"
-    echo "  install   - Re-run the base system setup (Homebrew, Oh My Zsh, etc.)"
-    echo "  dev-tools - Re-run the dev tools installer (Python, Node.js, Rust, etc.)"
+    echo "  update [target]     - Update everything (default) or a specific target"
+    echo "                        (try: macsmith update help)"
+    echo "  verify              - Verify installed tools and their versions"
+    echo "  versions            - Display detailed version info for all tools"
+    echo "  doctor              - Diagnose common setup issues (read-only)"
+    echo "  upgrade             - Update macsmith itself from GitHub (SHA-256 verified)"
+    echo "  install             - Re-run install.sh (tweak profiles, pick up core updates)"
+    echo "  dev-tools           - Re-run dev-tools.sh (add/remove language toolchains)"
+    echo "  uninstall-profile X - Brew-uninstall a sysadmin profile's packages"
+    echo "                        (try: macsmith uninstall-profile help)"
     echo ""
     echo "Optional environment variables:"
     echo "  MACSMITH_FIX_RUBY_GEMS=0|disabled Disable Ruby gem auto-fix"

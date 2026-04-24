@@ -36,18 +36,89 @@ Pick a tag from [Releases](https://github.com/26zl/macsmith/releases).
 ## Daily use
 
 ```text
-update      # upgrade everything (Homebrew, casks, language toolchains, global packages)
-verify      # health-check every installed tool
-versions    # print versions on one screen
-upgrade     # pull the latest macsmith release (signed, SHA-256 verified)
+update [target]    # upgrade everything (default) or a single target: brew/node/python/ruby/rust/swift/go/dotnet/nix/mas (try: update help)
+verify             # health-check every installed tool
+versions           # print versions on one screen
+doctor             # diagnose common setup issues (read-only)
+upgrade            # pull the latest macsmith release (SHA-256 verified against the release checksum)
+sys-install        # re-run install.sh (add/remove sysadmin profiles, pick up core updates)
+dev-tools          # re-run dev-tools.sh (add/remove language toolchains)
+uninstall-profile  # brew-uninstall a sysadmin profile's packages (power-user/crypto/netsec/devops/databases)
+uninstall-nix      # bundled macOS Nix uninstaller (--dry-run / --yes)
+uninstall-macsmith # remove macsmith itself (keeps Homebrew, language tools, your customizations)
+reload             # reload ~/.zprofile and ~/.zshrc after editing either
 ```
 
 ## What you get
 
-- **Shell**: Homebrew, Oh My Zsh (plugins only), Starship prompt, syntax highlighting, autosuggestions, FZF
-- **Languages**: Python (pyenv + uv), Node (nvm + pnpm + bun + deno), Ruby (chruby), Rust (rustup), Swift (swiftly), Go, Java, .NET
-- **Opt-in sysadmin profiles**: power-user CLI (btop, ripgrep, bat, gh, lazygit, tmux, neovim, …), crypto/secrets (age, sops, 1password-cli), netsec (nmap, wireshark, …), devops/SRE (kubectl, terraform, ansible, awscli, colima, orbstack, …)
-- **Maintenance**: `update` keeps every formula, cask, and language runtime current; `verify` shows gaps; project-local files (`package.json`, `go.mod`, `.swift-version`, …) are never touched
+Everything optional is behind a y/n prompt with a sensible default (press Enter to accept). Defaults shown in brackets.
+
+**Installed automatically** (core shell foundation):
+
+- Xcode Command Line Tools, Homebrew, Oh My Zsh (plugins-only), Starship prompt, zsh-syntax-highlighting, zsh-autosuggestions, FZF
+- The `macsmith` maintenance binary at `~/.local/bin/macsmith`
+- A managed `~/.zshrc` (your existing one is backed up with a timestamp)
+
+**Asked per tool during `./install.sh`**:
+
+- macOS package sources: `mas` **[N]**, `MacPorts` **[N]**, `Nix` **[N]**
+- Sysadmin profiles: power-user CLI **[Y]** (btop, ripgrep, bat, gh, lazygit, tmux, neovim, …), crypto/secrets **[Y]** (age, sops, gnupg, 1password-cli), netsec **[N]** (nmap, masscan, iperf3, Wireshark), devops/SRE **[N]** (kubectl, Terraform via HashiCorp tap, ansible, awscli, colima, orbstack, …), databases **[N]** (mysql, postgresql)
+
+**Asked per tool during `./dev-tools.sh`**:
+
+- Languages **[Y]**: Python (pyenv + pipx + uv), Node (nvm + pnpm + bun), Ruby (chruby + ruby-install), Rust (rustup), Go
+- Languages **[N]**: Swift (swiftly), Java (openjdk), .NET SDK, Conda/Miniforge, deno
+- JVM extras batch **[N]**: Kotlin, Scala, Clojure, Gradle, Maven, Groovy
+
+**Maintenance**: `update` keeps every formula, cask, and language runtime current; `verify` shows gaps. Project-local files (`package.json`, `go.mod`, `.swift-version`, …) are never touched.
+
+## What changes on your machine
+
+Concrete footprint before you commit to `curl | zsh`. Everything destructive to existing files creates a timestamped backup first.
+
+**Always written** (critical install, no prompt):
+
+- `~/.zshrc` — **overwritten** with macsmith's shell config. Previous file saved to `~/.zshrc.backup.YYYYMMDD_HHMMSS`. User-defined `alias`/`export` lines are harvested into `~/.zshrc.local` (secret-shaped exports — `*_TOKEN`, `*_SECRET`, `*_KEY` — are deliberately skipped).
+- `~/.zprofile` — managed block appended between `# FINAL PATH CLEANUP` and `# End macsmith managed block` markers. Previous file saved to `~/.zprofile.backup.YYYYMMDD_HHMMSS`.
+- `~/.local/bin/` — adds 3 binaries: `macsmith`, `uninstall-nix-macos`, `uninstall-macsmith`.
+- `~/.local/share/macsmith/` — created. Stores install-state marker, version file, and mirror of all repo scripts (used by `upgrade` and `uninstall-macsmith`).
+- `~/.config/starship.toml` — written **only if missing**. Existing configs are never overwritten.
+- **Homebrew** — installed at `/opt/homebrew` (Apple Silicon) or `/usr/local` (Intel) if not already present. The Homebrew installer itself requests `sudo`.
+
+**Written only if you say yes** (per-tool `[Y]`/`[N]` prompt):
+
+- **Oh My Zsh** → `~/.oh-my-zsh/` (uses its own installer when missing; we never touch an existing install).
+- **Homebrew packages**, by profile:
+  - `power-user` **[Y]**: 25 formulae (btop, ripgrep, bat, gh, lazygit, tmux, neovim, chezmoi, …)
+  - `crypto/secrets` **[Y]**: 4 formulae + 1 cask (age, sops, gnupg, pinentry-mac, 1password-cli)
+  - `netsec` **[N]**: 3 formulae + 1 cask (nmap, masscan, iperf3, Wireshark app) — strictly network-layer tools; web-app / DB-exploit scanners are deliberately excluded
+  - `devops/SRE` **[N]**: 18 formulae + 3 casks (kubectl, Terraform via `hashicorp/tap`, ansible, awscli, colima, docker, orbstack, google-cloud-sdk, multipass, …)
+  - `databases` **[N]**: 2 formulae (mysql, postgresql@17)
+- **Language toolchains** (via `./dev-tools.sh`, each one its own `[Y]`/`[N]` prompt):
+  - Python → `~/.pyenv/`
+  - Node.js → `~/.nvm/`
+  - Ruby → `~/.rubies/`, `~/.local/share/chruby/`, `~/.local/share/ruby-install/`
+  - Rust → `~/.rustup/`, `~/.cargo/`
+  - Swift → `~/.swiftly/`
+  - .NET → `/usr/local/share/dotnet/` (via brew cask; `sudo` for first install)
+  - Java (OpenJDK), Go, Conda/Miniforge, uv, bun, pnpm, deno — individual prompts
+- **MacPorts** → `/opt/local/`. Every install and every update needs `sudo`.
+- **Nix** → `/nix/` APFS volume + `/etc/nix/` + `LaunchDaemons` + `_nixbld1..32` users + `nixbld` group + edits to `/etc/synthetic.conf` and `/etc/fstab`. **System-wide, daemon-based, `sudo` required, 10–20 min.** Largest footprint of anything we offer.
+
+**Never touched**:
+
+- Existing Homebrew formulae/casks you installed yourself (`update` only upgrades; never uninstalls).
+- Project-local files (`package.json`, `Gemfile`, `go.mod`, `.swift-version`, `.python-version`, `.nvmrc`, …).
+- System Ruby at `/usr/bin/ruby`, system Python, macOS defaults, login items.
+- `~/.ssh/`, `~/.gnupg/`, `~/.aws/`, and everything in `~/.config/` except `starship.toml` when it's missing.
+- `/Applications/`, `/Library/`, `/System/`.
+
+**Reversing it**:
+
+- `uninstall-macsmith` — removes the 3 binaries, `~/.local/share/macsmith/`, the managed `.zprofile` block, and offers to restore `~/.zshrc` from the oldest non-macsmith backup. Does NOT touch Homebrew, OMZ, or language toolchains.
+- `uninstall-profile <name>` — `brew uninstall` a sysadmin profile's formulae + casks.
+- `uninstall-nix` — full Nix removal including the APFS volume (the volume-delete step always requires typing `yes` — `--yes` on everything else, never there).
+- Language toolchains: removed by their own tools (`rm -rf ~/.pyenv`, `brew uninstall go`, `rustup self uninstall`, …).
 
 ## Why not just …
 
@@ -62,6 +133,14 @@ upgrade     # pull the latest macsmith release (signed, SHA-256 verified)
 
 - `MACSMITH_REF=<tag>` — pin the bootstrap to a specific release (reproducible installs)
 - `MACSMITH_UPDATE_CHECK=1` — opt in to a daily update check on shell start (off by default)
+- `NONINTERACTIVE=1` — auto-answer "yes" to every prompt (for CI / unattended re-runs)
+- `MACSMITH_FIX_RUBY_GEMS=1` — auto-fix Ruby gem permissions during `update` (on by default; set `0` to disable)
+
+## Your own customizations
+
+macsmith manages `~/.zshrc`. Put your aliases and exports in `~/.zshrc.local` — it's sourced last so your edits survive reinstalls. Fresh installs also harvest existing `alias`/`export` lines from your old `~/.zshrc` into `~/.zshrc.local` automatically; secret-shaped exports (`*_TOKEN`, `*_SECRET`, `*_KEY`, …) are deliberately skipped — grab those from the timestamped backup next to your new `~/.zshrc`.
+
+**Prompt themes:** `starship preset --list` to browse, `starship preset <name> -o ~/.config/starship.toml` to apply. Examples: `tokyo-night`, `gruvbox-rainbow`, `pastel-powerline`, `catppuccin-powerline`, `pure-preset`.
 
 ## Ghostty terminal (optional)
 
@@ -77,6 +156,32 @@ The bundled config auto-installs macsmith's terminfo over SSH, so `xterm-ghostty
 ## Requirements
 
 macOS 13 Ventura or later. Apple Silicon or Intel. That's it.
+
+## Uninstalling
+
+Two bundled scripts, both defensive with `--dry-run` and `--yes` flags. Run `--dry-run` first to see exactly what will change.
+
+### Remove macsmith itself
+
+`uninstall-macsmith` removes what macsmith installed (binaries in `~/.local/bin/`, `~/.local/share/macsmith/`, the managed PATH block in `~/.zprofile`) and offers to restore `~/.zshrc` from the oldest non-macsmith-managed backup (skips `.zshrc.backup.*` files that look like they were made by a prior macsmith run so you get your original pre-macsmith config, not a macsmith template). Also offers to remove `~/.config/starship.toml`. It **keeps** Homebrew, any installed formulae/casks, Oh My Zsh, language toolchains (pyenv/nvm/chruby/rustup/swiftly/go/…), `~/.zshrc.local`, and every file you created.
+
+```bash
+uninstall-macsmith --dry-run     # show what will change
+uninstall-macsmith               # interactive
+uninstall-macsmith --yes         # non-interactive
+```
+
+### Remove Nix (macOS)
+
+`uninstall-nix` cleanly removes a multi-user Nix install: launch daemons, `_nixbld*` users, `/etc/nix`, `/etc/synthetic.conf`, `/etc/fstab`, and the `Nix Store` APFS volume. Auto-detects the Determinate Systems installer and prefers `sudo /nix/nix-installer uninstall` when present.
+
+```bash
+uninstall-nix --dry-run
+uninstall-nix
+uninstall-nix --yes
+```
+
+Both scripts are installed to `~/.local/bin/` by `./install.sh`. From a clone, you can also run `./scripts/uninstall-macsmith.sh` or `./scripts/uninstall-nix-macos.sh` directly. **macOS-only.** The Nix script re-execs under `sudo`; the APFS volume deletion always requires interactive confirmation typed as `yes` — `--yes` on `uninstall-nix` skips the other prompts but never that one. Read the scripts before running. A reboot is recommended after uninstalling Nix.
 
 ## License
 

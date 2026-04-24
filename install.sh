@@ -101,10 +101,13 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
-install_warnings=0
+# Warnings are collected so we can replay them as a bullet list at the end —
+# otherwise users have to scroll back through all the install output to find
+# what actually went wrong.
+install_warnings=()
 
 warn() {
-  ((install_warnings++))
+  install_warnings+=("$1")
   echo "${YELLOW}⚠️  $1${NC}"
 }
 
@@ -141,9 +144,21 @@ _ask_user() {
     echo -n "[y/N]: "
   fi
   
-  # Read input with validation
+  # Read input with validation. Prefer /dev/tty when stdin isn't a terminal —
+  # e.g. when bootstrap.sh is invoked via `curl | zsh`, install.sh inherits
+  # the curl pipe as stdin, and `read` would consume the remaining bootstrap
+  # source bytes instead of the user's answer. FORCE_INTERACTIVE=1 keeps the
+  # yes-piped CI test flow working (answers fed via stdin on purpose).
+  # The 2>/dev/null on the /dev/tty read silences "device not configured"
+  # when stdin lies about having a tty (e.g. nested Bash-tool invocation).
   local response=""
-  IFS= read -r response || return 1
+  if [[ -n "${FORCE_INTERACTIVE:-}" ]] || [[ -t 0 ]]; then
+    IFS= read -r response || return 1
+  elif [[ -e /dev/tty ]] && [[ -r /dev/tty ]]; then
+    IFS= read -r response </dev/tty 2>/dev/null || return 1
+  else
+    return 1
+  fi
   
   # Sanitize input: remove leading/trailing whitespace, limit length
   response=$(echo "$response" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -386,6 +401,17 @@ install_starship() {
 
   if command -v starship >/dev/null 2>&1; then
     echo "${GREEN}✅ Starship already installed${NC}"
+    # Detect non-brew starship installs so users don't end up with two copies
+    # (common after running curl|sh from starship.rs in addition to macsmith).
+    # The macsmith flow manages Starship via brew, and `update` only touches
+    # brew formulae — a stray /usr/local/bin/starship would silently rot.
+    local starship_path="$(command -v starship 2>/dev/null || true)"
+    if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
+      if ! "$HOMEBREW_PREFIX/bin/brew" list --formula starship >/dev/null 2>&1; then
+        warn "Starship at $starship_path is not brew-managed; macsmith can't update it"
+        echo "  ${BLUE}INFO:${NC} Consider: sudo rm $starship_path && brew install starship"
+      fi
+    fi
   elif [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
     echo "${YELLOW}📦 Installing Starship prompt via Homebrew...${NC}"
     if "$HOMEBREW_PREFIX/bin/brew" install starship; then
@@ -657,13 +683,21 @@ install_macports() {
 
 # Function to install Nix
 install_nix() {
-  # Check if Nix is already installed (multiple ways to detect)
-  if command -v nix >/dev/null 2>&1 || [[ -d /nix ]] || [[ -f /nix/var/nix/profiles/default/bin/nix ]]; then
-    if [[ -d /nix ]] || [[ -f /nix/var/nix/profiles/default/bin/nix ]]; then
-      echo "${GREEN}✅ Nix detected (may need PATH setup)${NC}"
-    else
-      echo "${GREEN}✅ Nix already installed${NC}"
-    fi
+  # Three-way detection: on PATH, installed but not wired to PATH, or partial
+  # (orphan /nix dir with no binary). The last case is common after a failed
+  # or abandoned install — we must NOT claim Nix is "detected" there, because
+  # setup_nix_path would then call ensure-path, which rejects the partial state.
+  if command -v nix >/dev/null 2>&1; then
+    echo "${GREEN}✅ Nix already installed${NC}"
+    return 0
+  fi
+  if [[ -f /nix/var/nix/profiles/default/bin/nix ]]; then
+    echo "${GREEN}✅ Nix detected (may need PATH setup)${NC}"
+    return 0
+  fi
+  if [[ -d /nix ]]; then
+    warn "/nix exists but no Nix binary found — looks like a partial install"
+    echo "  ${BLUE}INFO:${NC} Remove /nix manually or reinstall via https://nixos.org/download.html"
     return 0
   fi
   
@@ -779,10 +813,22 @@ setup_macsmith() {
     fi
     echo "$current_version" > "$data_dir/version"
 
-    # Copy scripts to data dir for reference
+    # Mirror the repo into the data dir so `upgrade` + the bundled-script
+    # installer can re-source helpers after the temp bootstrap clone is wiped.
     for script_file in install.sh dev-tools.sh bootstrap.sh zsh.sh macsmith.sh; do
       [[ -f "$script_dir/$script_file" ]] && cp "$script_dir/$script_file" "$data_dir/$script_file"
     done
+    # Helper scripts live in scripts/; copy the whole dir so uninstall-nix and
+    # uninstall-macsmith survive bootstrap cleanup AND get refreshed by upgrade.
+    if [[ -d "$script_dir/scripts" ]]; then
+      mkdir -p "$data_dir/scripts"
+      local helper_file
+      for helper_file in nix-macos-maintenance.sh uninstall-nix-macos.sh uninstall-macsmith.sh; do
+        if [[ -f "$script_dir/scripts/$helper_file" ]]; then
+          cp "$script_dir/scripts/$helper_file" "$data_dir/scripts/$helper_file"
+        fi
+      done
+    fi
 
     # Verify installation
     if [[ -x "$local_bin/macsmith" ]]; then
@@ -810,10 +856,62 @@ setup_macsmith() {
   fi
 }
 
+# Install a bundled helper script as a first-class binary in ~/.local/bin/.
+# Same reason for both uninstallers: users who arrived via `curl | zsh` lose
+# the temp clone after bootstrap exits, so these need to live somewhere
+# persistent. A missing source is a no-op (non-fatal).
+_install_bundled_script() {
+  local script_name="$1"   # e.g., uninstall-nix-macos.sh
+  local bin_name="$2"      # e.g., uninstall-nix-macos (no .sh)
+  local friendly="$3"      # e.g., "Nix uninstaller"
+  local alias_hint="$4"    # e.g., uninstall-nix
+  local local_bin="$HOME/.local/bin"
+  local data_dir="$HOME/.local/share/macsmith"
+  local src=""
+
+  # Try three sources in order: live REPO_ROOT (fresh install / clone),
+  # re-detection (edge cases), and the data-dir mirror (lets `upgrade`
+  # refresh helpers even when REPO_ROOT no longer exists).
+  if [[ -n "${REPO_ROOT:-}" ]] && [[ -f "$REPO_ROOT/scripts/$script_name" ]]; then
+    src="$REPO_ROOT/scripts/$script_name"
+  else
+    local detected="$(_detect_repo_root 2>/dev/null || echo "")"
+    if [[ -n "$detected" ]] && [[ -f "$detected/scripts/$script_name" ]]; then
+      src="$detected/scripts/$script_name"
+    elif [[ -f "$data_dir/scripts/$script_name" ]]; then
+      src="$data_dir/scripts/$script_name"
+    fi
+  fi
+
+  if [[ -z "$src" ]]; then
+    return 0
+  fi
+
+  mkdir -p "$local_bin"
+  if _atomic_copy "$src" "$local_bin/$bin_name" 755; then
+    echo "${GREEN}✅ $friendly installed to $local_bin/$bin_name${NC}"
+    echo "  ${BLUE}INFO:${NC} Run '$alias_hint' anytime (alias for the bundled script)"
+  else
+    warn "Failed to install $friendly to $local_bin (non-fatal)"
+  fi
+}
+
+setup_uninstall_nix_script() {
+  _install_bundled_script uninstall-nix-macos.sh uninstall-nix-macos "Nix uninstaller" uninstall-nix
+}
+
+setup_uninstall_macsmith_script() {
+  _install_bundled_script uninstall-macsmith.sh uninstall-macsmith "macsmith uninstaller" uninstall-macsmith
+}
+
 # Function to setup Nix PATH
 setup_nix_path() {
-  # Check if Nix is installed (same conditions as install_nix)
-  if command -v nix >/dev/null 2>&1 || [[ -d /nix ]] || [[ -f /nix/var/nix/profiles/default/bin/nix ]]; then
+  # Only wire up PATH if there's a real Nix binary to point at. Orphan /nix
+  # directories (partial installs) were previously triggering a misleading
+  # "Nix PATH setup had issues" warning because ensure-path correctly refuses
+  # to run against an incomplete install. install_nix already reported the
+  # partial state; nothing more to do here.
+  if command -v nix >/dev/null 2>&1 || [[ -f /nix/var/nix/profiles/default/bin/nix ]]; then
     echo "${YELLOW}📦 Setting up Nix PATH...${NC}"
     
     # Use REPO_ROOT that was detected at script start
@@ -825,10 +923,16 @@ setup_nix_path() {
     fi
     
     if [[ -n "$script_dir" ]] && [[ -f "$script_dir/scripts/nix-macos-maintenance.sh" ]]; then
-      if "$script_dir/scripts/nix-macos-maintenance.sh" ensure-path >/dev/null 2>&1; then
+      local ensure_output=""
+      local ensure_exit=0
+      ensure_output="$("$script_dir/scripts/nix-macos-maintenance.sh" ensure-path 2>&1)" || ensure_exit=$?
+      if [[ $ensure_exit -eq 0 ]]; then
         echo "${GREEN}✅ Nix PATH configured${NC}"
       else
-        warn "Nix PATH setup had issues (run manually: ./scripts/nix-macos-maintenance.sh ensure-path)"
+        # Surface the real failure reason so the user can act on it, rather
+        # than pointing them back at a script that will print the same error.
+        warn "Nix PATH setup failed (exit $ensure_exit):"
+        printf '%s\n' "$ensure_output" | sed 's/^/    /'
       fi
     else
       warn "Nix maintenance script not found (Nix PATH may need manual setup)"
@@ -844,20 +948,41 @@ setup_zprofile_path_cleanup() {
   echo "  ${BLUE}INFO:${NC} .zprofile is used by login shells to set up PATH"
   echo "  ${BLUE}INFO:${NC} This ensures Homebrew and other tools are available in all shell sessions"
   
-  # Check if PATH cleanup already exists
-  if [[ -f "$HOME/.zprofile" ]] && grep -q "FINAL PATH CLEANUP (FOR .ZPROFILE)" "$HOME/.zprofile"; then
-    echo "${GREEN}✅ PATH cleanup already configured in .zprofile${NC}"
-    return 0
+  local zprofile_file="$HOME/.zprofile"
+  local zprofile_start_re='^# =+ FINAL PATH CLEANUP \(FOR \.ZPROFILE\) =+$'
+  local zprofile_end_re='^# End macsmith managed block$'
+
+  # Check if a complete managed block already exists. Older macsmith installs
+  # had the start header but no end marker, which made uninstall-macsmith unable
+  # to cleanly remove the block. Treat that legacy format as repairable instead
+  # of "already configured".
+  if [[ -f "$zprofile_file" ]] && grep -qE "$zprofile_start_re" "$zprofile_file"; then
+    if grep -qE "$zprofile_end_re" "$zprofile_file"; then
+      echo "${GREEN}✅ PATH cleanup already configured in .zprofile${NC}"
+      return 0
+    fi
+    echo "  ${YELLOW}⚠️  Found legacy macsmith .zprofile block without end marker${NC}"
+    echo "  ${BLUE}INFO:${NC} Backing it up and replacing it with the current managed block"
   fi
   
   # Backup .zprofile if it exists (timestamped; non-atomic but harmless — if
   # the backup itself is interrupted we simply won't overwrite the original)
   local zprofile_existing=""
-  if [[ -f "$HOME/.zprofile" ]]; then
-    local zprofile_backup="$HOME/.zprofile.backup.$(date +%Y%m%d_%H%M%S)"
-    cp "$HOME/.zprofile" "$zprofile_backup"
+  if [[ -f "$zprofile_file" ]]; then
+    local zprofile_backup="$zprofile_file.backup.$(date +%Y%m%d_%H%M%S)"
+    cp "$zprofile_file" "$zprofile_backup"
     echo "  ${BLUE}INFO:${NC} Backed up existing .zprofile to $zprofile_backup"
-    zprofile_existing="$(cat "$HOME/.zprofile")"
+    if grep -qE "$zprofile_start_re" "$zprofile_file" && ! grep -qE "$zprofile_end_re" "$zprofile_file"; then
+      # Legacy block was intended to be the final section. Keep everything
+      # before it, then append the modern bounded block below.
+      zprofile_existing="$(awk -v start_re="$zprofile_start_re" '
+        $0 ~ start_re { exit }
+        { print }
+      ' "$zprofile_file")"
+      echo "  ${BLUE}INFO:${NC} Removed legacy unmanaged tail from .zprofile backup copy"
+    else
+      zprofile_existing="$(cat "$zprofile_file")"
+    fi
   fi
 
   # Build new .zprofile content in memory (existing + appended block) so the
@@ -925,10 +1050,11 @@ if [[ -n "$HOMEBREW_PREFIX" ]]; then
     export PATH="$HOMEBREW_PREFIX/bin:$HOMEBREW_PREFIX/sbin:$cleaned_path"
   } >/dev/null 2>&1
 fi
+# End macsmith managed block
 ZPROFILE_EOF
 )"
 
-  if ! printf '%s\n%s\n' "$zprofile_existing" "$zprofile_block" | _atomic_write "$HOME/.zprofile"; then
+  if ! printf '%s\n%s\n' "$zprofile_existing" "$zprofile_block" | _atomic_write "$zprofile_file"; then
     echo "${RED}❌ Failed to write ~/.zprofile${NC}"
     return 1
   fi
@@ -963,10 +1089,12 @@ install_sysadmin_tools() {
   local crypto_formulae=(age sops gnupg pinentry-mac)
   local crypto_casks=(1password-cli)
 
-  # Network & security tooling. Core items only; password crackers and
-  # wireless attack tools deliberately omitted (very specialised).
-  local netsec_formulae=(nmap masscan iperf3 nikto sqlmap)
-  local netsec_casks=(wireshark)
+  # Network tooling — strictly network-layer (L2-L4) and packet analysis.
+  # Web-app / DB-exploit scanners (nikto, sqlmap) are NOT included here; they
+  # belong to a separate "appsec" profile if ever added. Keeps this profile
+  # honest to its name for users who just want network visibility.
+  local netsec_formulae=(nmap masscan iperf3)
+  local netsec_casks=(wireshark-app)
 
   # DevOps / SRE tooling. Free container runtime via colima; OrbStack cask
   # as a fast proprietary alternative to Docker Desktop.
@@ -974,7 +1102,7 @@ install_sysadmin_tools() {
     # k8s
     kubernetes-cli helm k9s kubectx kustomize stern
     # IaC
-    terraform terragrunt tflint ansible
+    hashicorp/tap/terraform terragrunt tflint ansible
     # Cloud CLIs
     awscli azure-cli doctl
     # GitOps / CI
@@ -984,19 +1112,44 @@ install_sysadmin_tools() {
   )
   local devops_casks=(google-cloud-sdk orbstack multipass)
 
-  # Helpers: install each package individually so one failure doesn't abort the batch
+  # Databases. MySQL + PostgreSQL cover most dev cases and live in brew core.
+  # MongoDB requires the mongodb/brew tap (not in core since 2020) — deliberately
+  # omitted here to keep this profile tap-free. Users who want MongoDB can run:
+  #   brew tap mongodb/brew && brew install mongodb-community
+  local databases_formulae=(mysql postgresql@17)
+
+  # Two-phase batch: filter already-installed, then install the rest with a
+  # [current/total] progress prefix. </dev/null isolates brew from the caller's
+  # stdin so piped answers to _ask_user survive across brew invocations.
+  # The visible progress counter reduces premature Ctrl-C on long batches
+  # (power-user is 22 formulae) — users can see something is still happening.
   _brew_batch() {
     local label="$1"; shift
-    local failed=()
+    local total=$#
+    local skipped=0
+    local to_install=()
     local pkg
     for pkg in "$@"; do
       if "$brew" list --formula "$pkg" >/dev/null 2>&1; then
-        continue
+        ((skipped++))
+      else
+        to_install+=("$pkg")
       fi
-      echo "  installing $pkg..."
-      if ! "$brew" install "$pkg" >/dev/null 2>&1; then
+    done
+    local install_count=${#to_install[@]}
+    if (( install_count == 0 )); then
+      echo "  all $total already installed"
+      return 0
+    fi
+    echo "  installing $install_count new ($skipped already present)..."
+    local failed=()
+    local i=1
+    for pkg in "${to_install[@]}"; do
+      echo "  [$i/$install_count] installing $pkg..."
+      if ! "$brew" install "$pkg" </dev/null >/dev/null 2>&1; then
         failed+=("$pkg")
       fi
+      ((i++))
     done
     if (( ${#failed[@]} > 0 )); then
       warn "$label: failed to install: ${failed[*]}"
@@ -1005,16 +1158,31 @@ install_sysadmin_tools() {
 
   _brew_batch_cask() {
     local label="$1"; shift
-    local failed=()
+    local total=$#
+    local skipped=0
+    local to_install=()
     local pkg
     for pkg in "$@"; do
       if "$brew" list --cask "$pkg" >/dev/null 2>&1; then
-        continue
+        ((skipped++))
+      else
+        to_install+=("$pkg")
       fi
-      echo "  installing $pkg (cask)..."
-      if ! "$brew" install --cask "$pkg" >/dev/null 2>&1; then
+    done
+    local install_count=${#to_install[@]}
+    if (( install_count == 0 )); then
+      echo "  all $total already installed (cask)"
+      return 0
+    fi
+    echo "  installing $install_count new cask(s) ($skipped already present)..."
+    local failed=()
+    local i=1
+    for pkg in "${to_install[@]}"; do
+      echo "  [$i/$install_count] installing $pkg (cask)..."
+      if ! "$brew" install --cask "$pkg" </dev/null >/dev/null 2>&1; then
         failed+=("$pkg")
       fi
+      ((i++))
     done
     if (( ${#failed[@]} > 0 )); then
       warn "$label: failed to install: ${failed[*]}"
@@ -1035,16 +1203,24 @@ install_sysadmin_tools() {
     echo "${GREEN}✅ Crypto/secrets tools installed${NC}"
   fi
 
-  if _ask_user "${YELLOW}📦 Install network/security tools (nmap, wireshark, masscan, hashcat, sqlmap, ...)?" "N"; then
+  if _ask_user "${YELLOW}📦 Install network tools (nmap, masscan, iperf3, Wireshark)?" "N"; then
     _brew_batch "netsec" "${netsec_formulae[@]}"
     _brew_batch_cask "netsec-casks" "${netsec_casks[@]}"
     echo "${GREEN}✅ Network/security tools installed${NC}"
   fi
 
-  if _ask_user "${YELLOW}📦 Install DevOps/SRE tools (kubectl, terraform, ansible, awscli, gcloud, k9s, ...)?" "N"; then
+  if _ask_user "${YELLOW}📦 Install DevOps/SRE tools (kubectl, Terraform, ansible, awscli, gcloud, k9s, ...)?" "N"; then
+    echo "  ${BLUE}INFO:${NC} Terraform is provided by HashiCorp's Homebrew tap"
+    "$brew" tap hashicorp/tap </dev/null >/dev/null 2>&1 || warn "devops: failed to tap hashicorp/tap (terraform may fail)"
     _brew_batch "devops" "${devops_formulae[@]}"
     _brew_batch_cask "devops-casks" "${devops_casks[@]}"
     echo "${GREEN}✅ DevOps/SRE tools installed${NC}"
+  fi
+
+  if _ask_user "${YELLOW}📦 Install databases (mysql, postgresql@17)?" "N"; then
+    _brew_batch "databases" "${databases_formulae[@]}"
+    echo "${GREEN}✅ Databases installed${NC}"
+    echo "  ${BLUE}INFO:${NC} MongoDB is out-of-core; install via: brew tap mongodb/brew && brew install mongodb-community"
   fi
 }
 
@@ -1273,6 +1449,8 @@ main() {
   if ! install_xcode_clt; then echo "${RED}❌ Critical: Xcode Command Line Tools installation failed${NC}"; exit 1; fi
   if ! install_homebrew; then echo "${RED}❌ Critical: Homebrew installation failed${NC}"; exit 1; fi
   if ! setup_macsmith; then echo "${RED}❌ Critical: macsmith script installation failed${NC}"; exit 1; fi
+  setup_uninstall_nix_script || warn "Nix uninstaller install had issues (non-fatal)"
+  setup_uninstall_macsmith_script || warn "macsmith uninstaller install had issues (non-fatal)"
   if ! setup_zprofile_path_cleanup; then echo "${RED}❌ Critical: PATH cleanup setup failed${NC}"; exit 1; fi
   if ! install_zsh_config; then echo "${RED}❌ Critical: zsh configuration installation failed${NC}"; exit 1; fi
   if ! refresh_environment; then echo "${RED}❌ Critical: Environment refresh failed${NC}"; exit 1; fi
@@ -1292,8 +1470,15 @@ main() {
   _mark_install_state || warn "Failed to write install state marker"
 
   echo ""
-  if [[ $install_warnings -gt 0 ]]; then
-    echo "${YELLOW}⚠️  Installation completed with $install_warnings warning(s)${NC}"
+  if (( ${#install_warnings[@]} > 0 )); then
+    echo "${YELLOW}⚠️  Installation completed with ${#install_warnings[@]} warning(s):${NC}"
+    # Iterate values + counter; avoids ${!arr[@]} which isn't portable zsh↔bash
+    local _i=0
+    local _msg
+    for _msg in "${install_warnings[@]}"; do
+      _i=$((_i + 1))
+      printf '  %d. %s\n' "$_i" "$_msg"
+    done
   else
     echo "${GREEN}✅ Installation complete!${NC}"
   fi

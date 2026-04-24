@@ -430,6 +430,20 @@ if [[ -x "$macsmith_bin" ]]; then
   alias upgrade="$macsmith_bin upgrade"
   alias sys-install="$macsmith_bin install"
   alias dev-tools="$macsmith_bin dev-tools"
+  alias doctor="$macsmith_bin doctor"
+  alias uninstall-profile="$macsmith_bin uninstall-profile"
+fi
+# Standalone uninstallers shipped with macsmith. Installed by install.sh
+# to ~/.local/bin/ so aliases work even after the bootstrap temp clone is
+# wiped. `uninstall-nix` removes Nix cleanly; `uninstall-macsmith` removes
+# what macsmith itself installed (keeping Homebrew / language tools / OMZ).
+uninstall_nix_bin="$HOME/.local/bin/uninstall-nix-macos"
+if [[ -x "$uninstall_nix_bin" ]]; then
+  alias uninstall-nix="$uninstall_nix_bin"
+fi
+uninstall_macsmith_bin="$HOME/.local/bin/uninstall-macsmith"
+if [[ -x "$uninstall_macsmith_bin" ]]; then
+  alias uninstall-macsmith="$uninstall_macsmith_bin"
 fi
 
 # ================================ Swiftly ===================================

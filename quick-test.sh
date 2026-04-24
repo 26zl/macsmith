@@ -53,6 +53,20 @@ else
   test_failed=1
 fi
 
+if bash -n scripts/uninstall-nix-macos.sh; then
+  echo "${GREEN}✅ OK: scripts/uninstall-nix-macos.sh syntax valid${NC}"
+else
+  echo "FAIL: scripts/uninstall-nix-macos.sh syntax error"
+  test_failed=1
+fi
+
+if bash -n scripts/uninstall-macsmith.sh; then
+  echo "${GREEN}✅ OK: scripts/uninstall-macsmith.sh syntax valid${NC}"
+else
+  echo "FAIL: scripts/uninstall-macsmith.sh syntax error"
+  test_failed=1
+fi
+
 echo ""
 echo "2. Testing file existence..."
 if [[ -f install.sh ]]; then

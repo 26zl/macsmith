@@ -115,9 +115,21 @@ _ask_user() {
     echo -n "[y/N]: "
   fi
   
-  # Read input with validation
+  # Read input with validation. Prefer /dev/tty when stdin isn't a terminal —
+  # bootstrap.sh invokes us via `./dev-tools.sh` after the curl|zsh pipe, so
+  # stdin can still be the remaining bootstrap source. Reading from /dev/tty
+  # keeps interactive prompts working. FORCE_INTERACTIVE=1 keeps CI yes-piped
+  # tests working by forcing reads from stdin (the intended answer stream).
+  # 2>/dev/null silences "device not configured" when /dev/tty exists but
+  # the controlling terminal is gone (nested tool invocations, daemons).
   local response=""
-  IFS= read -r response || return 1
+  if [[ -n "${FORCE_INTERACTIVE:-}" ]] || [[ -t 0 ]]; then
+    IFS= read -r response || return 1
+  elif [[ -e /dev/tty ]] && [[ -r /dev/tty ]]; then
+    IFS= read -r response </dev/tty 2>/dev/null || return 1
+  else
+    return 1
+  fi
   
   # Sanitize input: remove leading/trailing whitespace, limit length
   response=$(echo "$response" | /usr/bin/tr -d '\r\n' | /usr/bin/sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -139,22 +151,38 @@ _ask_user() {
   esac
 }
 
-# Generic Homebrew batch installer. Skips already-installed packages and
-# records failures individually so one bad package doesn't stop the rest.
+# Two-phase batch: filter already-installed, install the rest with [i/n] prefix.
+# </dev/null isolates brew from the caller's stdin so queued answers survive.
+# Progress counter reduces premature Ctrl-C on long batches (e.g. JVM extras).
 _brew_batch() {
   local label="$1"; shift
   local brew="$HOMEBREW_PREFIX/bin/brew"
   [[ -z "$HOMEBREW_PREFIX" ]] || [[ ! -x "$brew" ]] && { warn "$label: Homebrew not available"; return 0; }
-  local failed=()
+  local total=$#
+  local skipped=0
+  local to_install=()
   local pkg
   for pkg in "$@"; do
     if "$brew" list --formula "$pkg" >/dev/null 2>&1; then
-      continue
+      ((skipped++))
+    else
+      to_install+=("$pkg")
     fi
-    echo "  installing $pkg..."
-    if ! "$brew" install "$pkg" >/dev/null 2>&1; then
+  done
+  local install_count=${#to_install[@]}
+  if (( install_count == 0 )); then
+    echo "  all $total already installed"
+    return 0
+  fi
+  echo "  installing $install_count new ($skipped already present)..."
+  local failed=()
+  local i=1
+  for pkg in "${to_install[@]}"; do
+    echo "  [$i/$install_count] installing $pkg..."
+    if ! "$brew" install "$pkg" </dev/null >/dev/null 2>&1; then
       failed+=("$pkg")
     fi
+    ((i++))
   done
   if (( ${#failed[@]} > 0 )); then
     warn "$label: failed to install: ${failed[*]}"
@@ -165,16 +193,31 @@ _brew_batch_cask() {
   local label="$1"; shift
   local brew="$HOMEBREW_PREFIX/bin/brew"
   [[ -z "$HOMEBREW_PREFIX" ]] || [[ ! -x "$brew" ]] && { warn "$label: Homebrew not available"; return 0; }
-  local failed=()
+  local total=$#
+  local skipped=0
+  local to_install=()
   local pkg
   for pkg in "$@"; do
     if "$brew" list --cask "$pkg" >/dev/null 2>&1; then
-      continue
+      ((skipped++))
+    else
+      to_install+=("$pkg")
     fi
-    echo "  installing $pkg (cask)..."
-    if ! "$brew" install --cask "$pkg" >/dev/null 2>&1; then
+  done
+  local install_count=${#to_install[@]}
+  if (( install_count == 0 )); then
+    echo "  all $total already installed (cask)"
+    return 0
+  fi
+  echo "  installing $install_count new cask(s) ($skipped already present)..."
+  local failed=()
+  local i=1
+  for pkg in "${to_install[@]}"; do
+    echo "  [$i/$install_count] installing $pkg (cask)..."
+    if ! "$brew" install --cask "$pkg" </dev/null >/dev/null 2>&1; then
       failed+=("$pkg")
     fi
+    ((i++))
   done
   if (( ${#failed[@]} > 0 )); then
     warn "$label: failed to install: ${failed[*]}"
@@ -215,7 +258,7 @@ _install_brew_tool() {
     if [[ -n "$tap" ]]; then
       "$brew" tap "$tap" >/dev/null 2>&1 || warn "$display: failed to tap $tap"
     fi
-    if "$brew" install "$tool" >/dev/null 2>&1; then
+    if "$brew" install "$tool" </dev/null >/dev/null 2>&1; then
       echo "${GREEN}✅ $display installed${NC}"
     else
       warn "$display installation failed"
@@ -281,7 +324,7 @@ install_conda() {
   
   if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
     if _ask_user "${YELLOW}📦 Conda/Miniforge not found. Install Miniforge via Homebrew?" "N"; then
-      if "$HOMEBREW_PREFIX/bin/brew" install --cask miniforge; then
+      if "$HOMEBREW_PREFIX/bin/brew" install --cask miniforge </dev/null; then
         echo "${GREEN}✅ Miniforge installed${NC}"
       else
         warn "Miniforge installation failed"
@@ -320,7 +363,7 @@ install_pipx() {
   
   if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
     if _ask_user "${YELLOW}📦 pipx not found. Install pipx via Homebrew?" "Y"; then
-      if "$HOMEBREW_PREFIX/bin/brew" install pipx; then
+      if "$HOMEBREW_PREFIX/bin/brew" install pipx </dev/null; then
         echo "${GREEN}✅ pipx installed${NC}"
       else
         warn "pipx installation failed"
@@ -388,7 +431,7 @@ install_pyenv() {
   
   if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
     if _ask_user "${YELLOW}📦 pyenv not found. Install pyenv via Homebrew?" "Y"; then
-      if "$HOMEBREW_PREFIX/bin/brew" install pyenv; then
+      if "$HOMEBREW_PREFIX/bin/brew" install pyenv </dev/null; then
         echo "${GREEN}✅ pyenv installed${NC}"
         # Install latest Python after pyenv is installed
         echo "  ${BLUE}INFO:${NC} Installing latest Python via pyenv..."
@@ -541,7 +584,7 @@ install_chruby() {
       echo "${YELLOW}📦 chruby: Would install via Homebrew${NC}"
     elif [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
       if _ask_user "${YELLOW}📦 chruby not found. Install chruby and ruby-install via Homebrew?" "Y"; then
-        if "$HOMEBREW_PREFIX/bin/brew" install chruby ruby-install; then
+        if "$HOMEBREW_PREFIX/bin/brew" install chruby ruby-install </dev/null; then
           echo "${GREEN}✅ chruby and ruby-install installed${NC}"
           # Find chruby script via Homebrew prefix (works on both Intel and Apple Silicon)
           local chruby_prefix
@@ -577,7 +620,7 @@ install_chruby() {
       return 0
     elif [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
       if _ask_user "${YELLOW}📦 ruby-install not found. Install ruby-install?" "Y"; then
-        if "$HOMEBREW_PREFIX/bin/brew" install ruby-install; then
+        if "$HOMEBREW_PREFIX/bin/brew" install ruby-install </dev/null; then
           echo "${GREEN}✅ ruby-install installed${NC}"
         else
           warn "ruby-install installation failed"
@@ -833,7 +876,7 @@ install_go() {
   
   if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
     if _ask_user "${YELLOW}📦 Go not found. Install Go via Homebrew?" "Y"; then
-      if "$HOMEBREW_PREFIX/bin/brew" install go; then
+      if "$HOMEBREW_PREFIX/bin/brew" install go </dev/null; then
         echo "${GREEN}✅ Go installed${NC}"
       else
         warn "Go installation failed"
@@ -875,7 +918,7 @@ install_java() {
   
   if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
     if _ask_user "${YELLOW}📦 Java not found. Install OpenJDK via Homebrew?" "N"; then
-      if "$HOMEBREW_PREFIX/bin/brew" install openjdk; then
+      if "$HOMEBREW_PREFIX/bin/brew" install openjdk </dev/null; then
         echo "${GREEN}✅ OpenJDK installed${NC}"
       else
         warn "OpenJDK installation failed"
@@ -915,7 +958,7 @@ install_dotnet() {
   
   if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
     if _ask_user "${YELLOW}📦 .NET SDK not found. Install .NET SDK via Homebrew?" "N"; then
-      if "$HOMEBREW_PREFIX/bin/brew" install --cask dotnet-sdk; then
+      if "$HOMEBREW_PREFIX/bin/brew" install --cask dotnet-sdk </dev/null; then
         echo "${GREEN}✅ .NET SDK installed${NC}"
       else
         warn ".NET SDK installation failed"

@@ -52,7 +52,17 @@ format = "took [$duration]($style) "
 style = "yellow"
 
 [kubernetes]
+# Context-aware: only show when the current directory looks like a k8s
+# project. Without this, Starship shows the current kube-context in EVERY
+# prompt (including ~), which is noisy for macsmith users who install
+# OrbStack (its k8s cluster registers as a context) but don't actually
+# work with Kubernetes in every shell. Devops users in k8s project dirs
+# still get the indicator automatically.
+# To always-on: remove detect_files/detect_folders (or set disabled = false
+# and delete both lists) in your ~/.config/starship.toml override.
 disabled = false
+detect_files = ["k8s.yaml", "k8s.yml", "kustomization.yaml", "skaffold.yaml", "helmfile.yaml", "Chart.yaml"]
+detect_folders = ["k8s", "manifests", "helm", "charts"]
 format = '[$symbol$context( \($namespace\))]($style) '
 
 [aws]
@@ -74,6 +84,19 @@ only_with_files = true
 
 [nix_shell]
 format = '[$symbol$state( \($name\))]($style) '
+
+# Ruby's module checks RUBY_VERSION / RBENV_VERSION by default, so the prompt
+# shows Ruby in every directory once chruby activates a version (which it
+# does at shell init). Override to file-based only — language projects with
+# Gemfile / .ruby-version / *.rb still trigger normally.
+# Note: Starship's Python and Java modules *also* activate on env vars
+# (VIRTUAL_ENV/PYENV_VERSION for Python, JAVA_HOME for Java) but those are
+# hardcoded in Starship and cannot be overridden from config. They activate
+# only when those vars are set — which for Python means you're in a venv
+# (meaningful signal) and for Java means JAVA_HOME is explicitly exported
+# (uncommon on macOS unless the user did so). No override needed.
+[ruby]
+detect_variables = []
 
 [python]
 format = '[${symbol}${pyenv_prefix}(${version} )(\($virtualenv\) )]($style)'

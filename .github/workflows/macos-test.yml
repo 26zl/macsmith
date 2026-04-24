@@ -61,8 +61,8 @@ jobs:
           echo ""
           echo "=== Checking file permissions ==="
           chmod +x install.sh dev-tools.sh macsmith.sh zsh.sh quick-test.sh 2>/dev/null || true
-          chmod +x scripts/nix-macos-maintenance.sh 2>/dev/null || true
-          
+          chmod +x scripts/nix-macos-maintenance.sh scripts/uninstall-nix-macos.sh scripts/uninstall-macsmith.sh 2>/dev/null || true
+
           # Test syntax
           echo ""
           echo "=== Testing syntax ==="
@@ -72,6 +72,8 @@ jobs:
           zsh -n macsmith.sh && echo "macsmith.sh syntax OK" || { echo "macsmith.sh syntax error"; exit 1; }
           zsh -n quick-test.sh && echo "quick-test.sh syntax OK" || { echo "quick-test.sh syntax error"; exit 1; }
           bash -n scripts/nix-macos-maintenance.sh && echo "nix-macos-maintenance.sh syntax OK" || { echo "nix-macos-maintenance.sh syntax error"; exit 1; }
+          bash -n scripts/uninstall-nix-macos.sh && echo "uninstall-nix-macos.sh syntax OK" || { echo "uninstall-nix-macos.sh syntax error"; exit 1; }
+          bash -n scripts/uninstall-macsmith.sh && echo "uninstall-macsmith.sh syntax OK" || { echo "uninstall-macsmith.sh syntax error"; exit 1; }
           
           echo ""
           echo "All required files present and syntax valid"
@@ -119,9 +121,14 @@ jobs:
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
           chmod +x install.sh macsmith.sh zsh.sh 2>/dev/null || true
 
-          # NONINTERACTIVE=1 makes _ask_user auto-answer "yes" without stdin pipe
-          # This avoids "y" spam from yes command leaking into brew/other subprocesses
-          (./install.sh 2>&1 | tee install.log) || true
+          # NONINTERACTIVE=1 makes _ask_user auto-answer "yes" without stdin pipe.
+          # Use PIPESTATUS[0] instead of `|| install_rc=$?` on a pipeline: the
+          # final `tee` always exits 0 and would mask an install.sh failure.
+          ./install.sh 2>&1 | tee install.log
+          install_rc="${PIPESTATUS[0]}"
+          if (( install_rc != 0 )); then
+            echo "::error::install.sh exited $install_rc on clean-HOME run"
+          fi
 
           # Restore tool paths after install.sh subshell (PATH changes are lost in subshell/pipe)
           if [[ -d /opt/homebrew ]]; then
@@ -140,7 +147,15 @@ jobs:
           echo ""
           echo "Testing dev-tools.sh on macOS with a clean HOME..."
           chmod +x dev-tools.sh 2>/dev/null || true
-          (./dev-tools.sh 2>&1 | tee dev-tools.log) || true
+          ./dev-tools.sh 2>&1 | tee dev-tools.log
+          devtools_rc="${PIPESTATUS[0]}"
+          if (( devtools_rc != 0 )); then
+            echo "::error::dev-tools.sh exited $devtools_rc on clean-HOME run"
+          fi
+          if (( install_rc != 0 || devtools_rc != 0 )); then
+            echo "::error::One or more install scripts failed; failing the job"
+            exit 1
+          fi
           echo ""
           echo "=== dev-tools.sh log summary ==="
           tail -50 dev-tools.log || true
@@ -1198,14 +1213,21 @@ jobs:
             # Test syntax
             zsh -n quick-test.sh && echo "quick-test.sh syntax OK" || { echo "quick-test.sh syntax error"; exit 1; }
 
-            # Run quick test
+            # Run quick test — fail the job on non-zero exit OR missing output.
+            # Previously this was a warning-only check, which silently let broken
+            # quick-test.sh slip through.
+            qt_rc=0
             ./quick-test.sh 2>&1 | tee quick_test_output.txt
-
-            if grep -qE "Quick Test|Test Complete|Testing|Checking" quick_test_output.txt; then
-              echo "quick-test.sh completed successfully"
-            else
-              echo "WARNING: quick-test.sh may not have completed"
+            qt_rc="${PIPESTATUS[0]}"
+            if (( qt_rc != 0 )); then
+              echo "::error::quick-test.sh exited $qt_rc"
+              exit 1
             fi
+            if ! grep -qE "Quick Test|Test Complete|Testing|Checking" quick_test_output.txt; then
+              echo "::error::quick-test.sh produced no expected output"
+              exit 1
+            fi
+            echo "quick-test.sh completed successfully"
 
             # Verify quick-test checks important things
             if grep -qE "zshrc|zprofile|oh-my-zsh|macsmith" quick_test_output.txt; then
