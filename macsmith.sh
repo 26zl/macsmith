@@ -3557,15 +3557,22 @@ versions() {
     echo "PostgreSQL ..... not installed"
   fi
   
-  # Modern language tooling (installed via dev-tools.sh)
+  # Modern language tooling (installed via dev-tools.sh).
+  # Match the dotted "Tool ........... value" style used above, instead of
+  # printf '%-15s %s\n' which produced bare-spaces and broke the column.
+  local _ver="" _dots=""
   for _tool in uv bun pnpm deno; do
     if command -v "$_tool" >/dev/null 2>&1; then
-      printf '%-15s %s\n' "$_tool" "$("$_tool" --version 2>/dev/null | head -n1)"
+      _ver="$("$_tool" --version 2>/dev/null | head -n1)"
+      # Strip leading "tool " prefix so we don't print the name twice
+      # (e.g. `uv --version` -> "uv 0.11.7" becomes "0.11.7").
+      _ver="${_ver#"$_tool" }"
+      _dots="$(printf '%*s' $((15 - ${#_tool})) '' | tr ' ' '.')"
+      printf '%s %s %s\n' "$_tool" "$_dots" "$_ver"
     fi
   done
   # JVM ecosystem (opt-in batch in dev-tools.sh). See verify() for why kotlin
   # and gradle need special-casing.
-  local _ver=""
   for _tool in kotlin scala clojure gradle mvn groovy; do
     if command -v "$_tool" >/dev/null 2>&1; then
       case "$_tool" in
@@ -3573,10 +3580,11 @@ versions() {
         gradle) _ver="$(gradle --version 2>&1 | grep -E '^Gradle ' | head -n1)" ;;
         *)      _ver="$("$_tool" --version 2>/dev/null | head -n1)" ;;
       esac
-      printf '%-15s %s\n' "$_tool" "$_ver"
+      _dots="$(printf '%*s' $((15 - ${#_tool})) '' | tr ' ' '.')"
+      printf '%s %s %s\n' "$_tool" "$_dots" "$_ver"
     fi
   done
-  unset _tool _ver
+  unset _tool _ver _dots
 
   echo "${GREEN}===================================================${NC}"
   return 0
@@ -4134,11 +4142,13 @@ case "${1:-}" in
     echo "                        (try: macsmith uninstall-profile help)"
     echo ""
     echo "Optional environment variables:"
-    echo "  MACSMITH_FIX_RUBY_GEMS=0|disabled Disable Ruby gem auto-fix"
-    echo "  MACSMITH_CLEAN_PYENV=0|disabled  Disable pyenv cleanup (MACSMITH_PYENV_KEEP=...)"
-    echo "  MACSMITH_CLEAN_NVM=0|disabled    Disable Node cleanup (MACSMITH_NVM_KEEP=...)"
-    echo "  MACSMITH_CLEAN_CHRUBY=0|disabled Disable chruby cleanup (MACSMITH_CHRUBY_KEEP=...)"
-    echo "  MACSMITH_SWIFT_SNAPSHOTS=1       Enable Swift development snapshot updates"
+    echo "  MACSMITH_FIX_RUBY_GEMS=0|disabled    Disable Ruby gem auto-fix"
+    echo "  MACSMITH_CLEAN_PYENV=0|disabled      Disable pyenv cleanup (MACSMITH_PYENV_KEEP=...)"
+    echo "  MACSMITH_CLEAN_NVM=0|disabled        Disable Node cleanup (MACSMITH_NVM_KEEP=...)"
+    echo "  MACSMITH_CLEAN_CHRUBY=0|disabled     Disable chruby cleanup (MACSMITH_CHRUBY_KEEP=...)"
+    echo "  MACSMITH_SWIFT_SNAPSHOTS=1           Enable Swift development snapshot updates"
+    echo "  MACSMITH_UPDATE_CHECK=1              Opt in to shell-startup update check (off by default)"
+    echo "  MACSMITH_ALLOW_UNSIGNED_UPGRADE=1    Opt in to upgrade from unsigned GitHub zipball"
     exit 1
     ;;
 esac

@@ -828,7 +828,13 @@ install_swiftly() {
     local _swift_installed=false
     if [[ -d "$HOME/.swiftly/toolchains" ]] && /usr/bin/find "$HOME/.swiftly/toolchains" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | /usr/bin/grep -q .; then
       _swift_installed=true
-    elif swiftly list installed 2>/dev/null | /usr/bin/grep -qE "[0-9]+\.[0-9]+"; then
+    # Newer swiftly: `list` (not `list installed`); older swiftly subcommand
+    # rejects "installed" with "invalid toolchain selector". Match either form.
+    elif swiftly list 2>/dev/null | /usr/bin/grep -qE "Swift [0-9]+\.[0-9]+"; then
+      _swift_installed=true
+    # Fallback: if a Swift compiler is on PATH and reports a version, the
+    # toolchain is functional regardless of where swiftly hides its files.
+    elif command -v swift >/dev/null 2>&1 && swift --version 2>/dev/null | /usr/bin/grep -qE "[0-9]+\.[0-9]+\.[0-9]+"; then
       _swift_installed=true
     fi
     if [[ "$_swift_installed" == true ]]; then

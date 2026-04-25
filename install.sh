@@ -1263,27 +1263,64 @@ install_sysadmin_tools() {
     fi
   }
 
+  # Returns 0 when every package passed in is already installed via brew.
+  # Args alternate by section:
+  #   _profile_complete --formula pkg1 pkg2 ... [--cask pkg1 pkg2 ...]
+  # Used to skip the per-profile install prompt on upgrade re-runs when there
+  # is nothing left to do.
+  _profile_complete() {
+    local mode="formula"
+    local pkg app
+    for pkg in "$@"; do
+      case "$pkg" in
+        --formula) mode="formula"; continue ;;
+        --cask)    mode="cask";    continue ;;
+      esac
+      if [[ "$mode" == "formula" ]]; then
+        "$brew" list --formula "$pkg" >/dev/null 2>&1 || return 1
+      else
+        "$brew" list --cask "$pkg" >/dev/null 2>&1 && continue
+        # Cask not installed via brew — accept a manually-installed .app at the
+        # standard location (matches _brew_batch_cask's "skipping outside brew").
+        app="$(_cask_app_for "$pkg")"
+        if [[ -n "$app" ]] && { [[ -d "/Applications/$app" ]] || [[ -d "$HOME/Applications/$app" ]]; }; then
+          continue
+        fi
+        return 1
+      fi
+    done
+    return 0
+  }
+
   echo ""
   echo "${BLUE}=== Extra tooling (profiles) ===${NC}"
 
-  if _ask_user "${YELLOW}📦 Install power-user CLI (btop, gh, lazygit, ripgrep, bat, jq, chezmoi, neovim, mole, ...)?" "Y"; then
+  if _profile_complete --formula "${poweruser[@]}"; then
+    echo "${GREEN}✅ Power-user tools already installed (skipping prompt)${NC}"
+  elif _ask_user "${YELLOW}📦 Install power-user CLI (btop, gh, lazygit, ripgrep, bat, jq, chezmoi, neovim, mole, ...)?" "Y"; then
     echo "  ${BLUE}INFO:${NC} mole is provided by the tw93/tap Homebrew tap"
     _brew_batch "power-user" "${poweruser[@]}"
     echo "${GREEN}✅ Power-user tools installed${NC}"
   fi
 
-  if _ask_user "${YELLOW}📦 Install crypto/secrets tools (age, sops, gnupg, pinentry-mac)?" "Y"; then
+  if _profile_complete --formula "${crypto_formulae[@]}"; then
+    echo "${GREEN}✅ Crypto/secrets tools already installed (skipping prompt)${NC}"
+  elif _ask_user "${YELLOW}📦 Install crypto/secrets tools (age, sops, gnupg, pinentry-mac)?" "Y"; then
     _brew_batch "crypto" "${crypto_formulae[@]}"
     echo "${GREEN}✅ Crypto/secrets tools installed${NC}"
   fi
 
-  if _ask_user "${YELLOW}📦 Install network tools (nmap, masscan, iperf3, Wireshark)?" "N"; then
+  if _profile_complete --formula "${netsec_formulae[@]}" --cask "${netsec_casks[@]}"; then
+    echo "${GREEN}✅ Network/security tools already installed (skipping prompt)${NC}"
+  elif _ask_user "${YELLOW}📦 Install network tools (nmap, masscan, iperf3, Wireshark)?" "N"; then
     _brew_batch "netsec" "${netsec_formulae[@]}"
     _brew_batch_cask "netsec-casks" "${netsec_casks[@]}"
     echo "${GREEN}✅ Network/security tools installed${NC}"
   fi
 
-  if _ask_user "${YELLOW}📦 Install DevOps/SRE tools (kubectl, Terraform, ansible, awscli, gcloud, k9s, ...)?" "N"; then
+  if _profile_complete --formula "${devops_formulae[@]}" --cask "${devops_casks[@]}"; then
+    echo "${GREEN}✅ DevOps/SRE tools already installed (skipping prompt)${NC}"
+  elif _ask_user "${YELLOW}📦 Install DevOps/SRE tools (kubectl, Terraform, ansible, awscli, gcloud, k9s, ...)?" "N"; then
     echo "  ${BLUE}INFO:${NC} Terraform is provided by HashiCorp's Homebrew tap"
     "$brew" tap hashicorp/tap </dev/null >/dev/null 2>&1 || warn "devops: failed to tap hashicorp/tap (terraform may fail)"
     _brew_batch "devops" "${devops_formulae[@]}"
@@ -1291,7 +1328,9 @@ install_sysadmin_tools() {
     echo "${GREEN}✅ DevOps/SRE tools installed${NC}"
   fi
 
-  if _ask_user "${YELLOW}📦 Install databases (mysql, postgresql@17)?" "N"; then
+  if _profile_complete --formula "${databases_formulae[@]}"; then
+    echo "${GREEN}✅ Databases already installed (skipping prompt)${NC}"
+  elif _ask_user "${YELLOW}📦 Install databases (mysql, postgresql@17)?" "N"; then
     _brew_batch "databases" "${databases_formulae[@]}"
     echo "${GREEN}✅ Databases installed${NC}"
     echo "  ${BLUE}INFO:${NC} MongoDB is out-of-core; install via: brew tap mongodb/brew && brew install mongodb-community"
