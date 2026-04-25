@@ -1,16 +1,17 @@
 name: Release
 
-# Production gating: releases are cut ONLY when a GitHub Release is created
-# or the workflow is manually dispatched. The previous workflow_run trigger
-# (auto-release after every green "macOS Test" on main) is intentionally
-# removed — it made every push a potential public release with no human
-# review surface. Note: plain `git push --tags` does NOT fire this; the
-# release:created event requires creating a Release (not just a tag).
-# Intended flow (pick one):
+# Auto-release: every green run of "macOS Test" on main produces a release.
+# The check-workflows job below still gates on Checks + macOS Test + Security
+# Scan all succeeding on the same SHA, so a partial-green main can't ship.
+# Manual flows still work:
 #   A. gh release create vYYYY.MM.DD-<short-sha> --generate-notes
 #   B. GitHub UI → Releases → Draft a new release → Publish
 #   C. Actions → Release → Run workflow (supply a version string)
 on:
+  workflow_run:
+    workflows: ["macOS Test"]
+    types: [completed]
+    branches: [main]
   release:
     types: [created]
   workflow_dispatch:

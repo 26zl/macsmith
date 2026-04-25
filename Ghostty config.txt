@@ -22,7 +22,9 @@ background = #000000
 background-opacity = 0.75
 
 # --- Background image ---
-background-image = "$HOME/.config/ghostty/terminal-background.png"
+# Ghostty does NOT expand ~ or $HOME in config files — replace with your
+# absolute path, e.g. /Users/yourname/.config/ghostty/terminal-background.png
+background-image = /Users/CHANGE_ME/.config/ghostty/terminal-background.png
 background-image-opacity = 0.85
 background-image-fit = cover
 background-image-position = center

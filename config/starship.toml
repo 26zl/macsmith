@@ -76,11 +76,9 @@ disabled = true
 [azure]
 disabled = true
 
-[terraform]
-format = "[$symbol$workspace]($style) "
-
 [docker_context]
 only_with_files = true
+detect_files = ["Dockerfile"]
 
 [nix_shell]
 format = '[$symbol$state( \($name\))]($style) '
@@ -98,8 +96,26 @@ format = '[$symbol$state( \($name\))]($style) '
 [ruby]
 detect_variables = []
 
+# Language modules: only show in real project dirs (presence of a project
+# marker file), never just because a stray .py/.js/.rs/etc. happens to be
+# in the current directory. Same philosophy as the docker_context override.
 [python]
 format = '[${symbol}${pyenv_prefix}(${version} )(\($virtualenv\) )]($style)'
+detect_extensions = []
 
 [nodejs]
 format = "[$symbol($version )]($style)"
+detect_extensions = []
+
+[rust]
+detect_extensions = []
+
+[golang]
+detect_extensions = []
+
+[swift]
+detect_extensions = []
+
+[terraform]
+format = "[$symbol$workspace]($style) "
+detect_extensions = []
