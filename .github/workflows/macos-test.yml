@@ -237,7 +237,6 @@ jobs:
           # Validate installation outputs
           echo ""
           echo "=== Validating installed files ==="
-          [[ -d "$HOME/.oh-my-zsh" ]] || { echo "Missing ~/.oh-my-zsh"; exit 1; }
           [[ -f "$HOME/.zshrc" ]] || { echo "Missing ~/.zshrc"; exit 1; }
           [[ -f "$HOME/.zprofile" ]] || { echo "Missing ~/.zprofile"; exit 1; }
           
@@ -261,8 +260,9 @@ jobs:
           fi
           
           command -v starship >/dev/null 2>&1 || { echo 'Missing Starship prompt (install with: brew install starship)'; exit 1; }
-          [[ -d "$HOME/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting" ]] || { echo "Missing zsh-syntax-highlighting"; exit 1; }
-          [[ -d "$HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" ]] || { echo "Missing zsh-autosuggestions"; exit 1; }
+          BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
+          [[ -f "$BREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]] || { echo "Missing zsh-syntax-highlighting (brew formula)"; exit 1; }
+          [[ -f "$BREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] || { echo "Missing zsh-autosuggestions (brew formula)"; exit 1; }
           
           # Validate shell config content
           echo ""
@@ -278,8 +278,10 @@ jobs:
           grep -q "macsmith_bin" "$HOME/.zshrc" || { echo "Missing macsmith_bin in ~/.zshrc"; exit 1; }
           grep -q "alias update=" "$HOME/.zshrc" && echo "update alias definition found in ~/.zshrc" || echo "update alias definition not found (may be conditional)"
           grep -q 'starship init zsh' "$HOME/.zshrc" || { echo "Missing Starship init line in ~/.zshrc"; exit 1; }
-          grep -q 'ZSH_THEME=""' "$HOME/.zshrc" || { echo "Expected empty ZSH_THEME in ~/.zshrc (Starship takes over)"; exit 1; }
-          grep -q "oh-my-zsh.sh" "$HOME/.zshrc" || { echo "Missing Oh My Zsh source line in ~/.zshrc"; exit 1; }
+          grep -q 'zsh-syntax-highlighting.zsh' "$HOME/.zshrc" || { echo "Missing zsh-syntax-highlighting source line in ~/.zshrc"; exit 1; }
+          grep -q 'zsh-autosuggestions.zsh' "$HOME/.zshrc" || { echo "Missing zsh-autosuggestions source line in ~/.zshrc"; exit 1; }
+          grep -q 'zoxide init zsh' "$HOME/.zshrc" || { echo "Missing zoxide init in ~/.zshrc"; exit 1; }
+          grep -q 'direnv hook zsh' "$HOME/.zshrc" || { echo "Missing direnv hook in ~/.zshrc"; exit 1; }
           
           # Test that install.sh functions exist
           echo ""
@@ -1230,7 +1232,7 @@ jobs:
             echo "quick-test.sh completed successfully"
 
             # Verify quick-test checks important things
-            if grep -qE "zshrc|zprofile|oh-my-zsh|macsmith" quick_test_output.txt; then
+            if grep -qE "zshrc|zprofile|macsmith" quick_test_output.txt; then
               echo "quick-test.sh checks essential components"
             else
               echo "WARNING: quick-test.sh may not check essential components"
@@ -1262,13 +1264,6 @@ jobs:
             zsh -n zsh.sh && echo "zsh.sh syntax OK" || { echo "zsh.sh syntax error"; exit 1; }
 
             # Verify it contains essential zsh configuration
-            if grep -q "oh-my-zsh" zsh.sh; then
-              echo "zsh.sh contains Oh My Zsh configuration"
-            else
-              echo "ERROR: zsh.sh missing Oh My Zsh configuration"
-              exit 1
-            fi
-
             if grep -q "starship init zsh" zsh.sh; then
               echo "zsh.sh contains Starship init"
             else
@@ -1276,10 +1271,31 @@ jobs:
               exit 1
             fi
 
-            if grep -q "plugins=" zsh.sh; then
-              echo "zsh.sh contains plugin configuration"
+            if grep -q "zsh-syntax-highlighting.zsh" zsh.sh; then
+              echo "zsh.sh sources zsh-syntax-highlighting"
             else
-              echo "ERROR: zsh.sh missing plugin configuration"
+              echo "ERROR: zsh.sh missing zsh-syntax-highlighting source"
+              exit 1
+            fi
+
+            if grep -q "zsh-autosuggestions.zsh" zsh.sh; then
+              echo "zsh.sh sources zsh-autosuggestions"
+            else
+              echo "ERROR: zsh.sh missing zsh-autosuggestions source"
+              exit 1
+            fi
+
+            if grep -q "zoxide init zsh" zsh.sh; then
+              echo "zsh.sh wires up zoxide"
+            else
+              echo "ERROR: zsh.sh missing zoxide init"
+              exit 1
+            fi
+
+            if grep -q "direnv hook zsh" zsh.sh; then
+              echo "zsh.sh wires up direnv"
+            else
+              echo "ERROR: zsh.sh missing direnv hook"
               exit 1
             fi
 

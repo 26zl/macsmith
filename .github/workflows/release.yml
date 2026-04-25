@@ -256,7 +256,7 @@ jobs:
             
             ### Installation
             1. Download and extract the zip file
-            2. Run `./install.sh` for shell setup (Oh My Zsh, terminal config)
+            2. Run `./install.sh` for shell setup (Starship + zsh plugins via Homebrew)
             3. (Optional) Run `./dev-tools.sh` to install package managers and language tools
             
             ### Files included

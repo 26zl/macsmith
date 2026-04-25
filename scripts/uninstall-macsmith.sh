@@ -10,7 +10,7 @@
 #
 # Leaves alone (your property):
 #   - Homebrew and any installed formulae/casks
-#   - Oh My Zsh, language toolchains (pyenv/nvm/chruby/rustup/swiftly/go/...)
+#   - Language toolchains (pyenv/nvm/chruby/rustup/swiftly/go/...)
 #   - ~/.zshrc.local and any other user-created files
 #   - Language state dirs (~/.nvm, ~/.pyenv, ~/.rustup, ...)
 #
@@ -60,8 +60,8 @@ Removes macsmith artifacts from your home directory:
   - Optionally: restores ~/.zshrc from the oldest non-macsmith-managed backup
   - Optionally: removes ~/.config/starship.toml
 
-Does NOT touch: Homebrew, formulae, Oh My Zsh, language toolchains,
-~/.zshrc.local, or any user-created files.
+Does NOT touch: Homebrew, formulae, language toolchains, ~/.zshrc.local,
+or any user-created files.
 USAGE
       exit 0
       ;;
@@ -183,7 +183,7 @@ cat <<EOF
 
 NOT removed:
   - Homebrew or any installed formulae/casks
-  - Oh My Zsh, language toolchains (pyenv, nvm, chruby, rustup, swiftly, go, …)
+  - Language toolchains (pyenv, nvm, chruby, rustup, swiftly, go, …)
   - ~/.zshrc.local and any other files you created
   - Language state dirs (~/.nvm, ~/.pyenv, ~/.rustup, …)
 

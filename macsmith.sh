@@ -2705,17 +2705,17 @@ EOF
       echo "  Could not determine current Nix version"
     fi
     
-    # Fix Oh My Zsh compaudit issues if present (only if Oh My Zsh is loaded)
-    # Note: compaudit is an Oh My Zsh function, so it's only available if Oh My Zsh is sourced
-    if [[ -n "${ZSH:-}" ]] && [[ -f "$ZSH/oh-my-zsh.sh" ]] && command -v compaudit >/dev/null 2>&1; then
+    # Fix zsh insecure completion directories if any. compaudit ships with
+    # zsh's compinit (autoload-on-demand), not Oh My Zsh — works on any zsh.
+    if autoload -Uz compaudit 2>/dev/null && command -v compaudit >/dev/null 2>&1; then
       local insecure_dirs
       insecure_dirs=$(compaudit 2>&1 || true)
       if [[ -n "$insecure_dirs" ]]; then
-        echo "  Fixing Oh My Zsh insecure completion directories..."
+        echo "  Fixing zsh insecure completion directories..."
         if echo "$insecure_dirs" | xargs -I {} chmod g-w,o-w {} 2>/dev/null; then
-          echo "  Oh My Zsh permissions fixed"
+          echo "  zsh completion permissions fixed"
         else
-          echo "  ${RED}WARNING:${NC} Could not fix Oh My Zsh permissions (may require sudo)"
+          echo "  ${RED}WARNING:${NC} Could not fix zsh completion permissions (may require sudo)"
         fi
       fi
     fi
@@ -3969,15 +3969,15 @@ uninstall_profile() {
 Usage: macsmith uninstall-profile <name>
 
 Valid profiles:
-  power-user   btop, ncdu, dust, duf, ripgrep, bat, eza, fd, zoxide, jq, yq,
-               tree, tldr, watch, gh, lazygit, mtr, bandwhich, direnv,
+  power-user   btop, dust, ripgrep, bat, eza, fd, zoxide, jq, yq,
+               tree, tlrc, watch, gh, lazygit, mtr, bandwhich, direnv,
                shellcheck, shfmt, pre-commit, tmux, neovim, chezmoi,
                tw93/tap/mole
   crypto       age, sops, gnupg, pinentry-mac
   netsec       nmap, masscan, iperf3, wireshark-app (cask)
   devops       kubernetes-cli, helm, k9s, kubectx, kustomize, stern,
                hashicorp/tap/terraform, terragrunt, tflint, ansible, awscli, azure-cli,
-               doctl, argocd, skaffold, colima, docker, docker-compose,
+               doctl, argocd, skaffold, docker, docker-compose,
                google-cloud-sdk/orbstack/multipass (casks)
   databases    mysql, postgresql@17
 
@@ -3996,7 +3996,7 @@ EOF
   local casks=()
   case "$profile" in
     power-user)
-      formulae=(btop ncdu dust duf ripgrep bat eza fd zoxide jq yq tree tldr watch gh lazygit mtr bandwhich direnv shellcheck shfmt pre-commit tmux neovim chezmoi tw93/tap/mole)
+      formulae=(btop dust ripgrep bat eza fd zoxide jq yq tree tlrc watch gh lazygit mtr bandwhich direnv shellcheck shfmt pre-commit tmux neovim chezmoi tw93/tap/mole)
       ;;
     crypto)
       formulae=(age sops gnupg pinentry-mac)
@@ -4006,7 +4006,7 @@ EOF
       casks=(wireshark-app)
       ;;
     devops)
-      formulae=(kubernetes-cli helm k9s kubectx kustomize stern hashicorp/tap/terraform terragrunt tflint ansible awscli azure-cli doctl argocd skaffold colima docker docker-compose)
+      formulae=(kubernetes-cli helm k9s kubectx kustomize stern hashicorp/tap/terraform terragrunt tflint ansible awscli azure-cli doctl argocd skaffold docker docker-compose)
       casks=(google-cloud-sdk orbstack multipass)
       ;;
     databases)

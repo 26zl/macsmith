@@ -501,43 +501,46 @@ cmd_cleanup() {
 
 # Fix compaudit
 cmd_fix_compaudit() {
-    _log_section "Fixing Oh My Zsh Compaudit Issues"
-    
-    if ! command -v compaudit > /dev/null 2>&1; then
-        _log_error "compaudit not found (Oh My Zsh may not be installed)"
+    _log_section "Fixing zsh insecure completion directories"
+
+    # compaudit ships with zsh's compinit (autoload-on-demand) — it's a zsh
+    # function, not a regular command, so this bash script invokes it via
+    # a `zsh -c` subshell. The previous "command -v compaudit" check never
+    # worked from bash and would always early-return.
+    if ! command -v zsh >/dev/null 2>&1; then
+        _log_error "zsh not found; cannot run compaudit"
         return 1
     fi
-    
+
     _log_info "Checking for insecure completion directories..."
     local insecure_dirs
-    insecure_dirs=$(compaudit 2>&1 || true)
-    
+    insecure_dirs=$(zsh -c 'autoload -Uz compaudit && compaudit' 2>&1 || true)
+
     if [[ -z "$insecure_dirs" ]]; then
         _log_success "No insecure directories found"
         return 0
     fi
-    
+
     _log_warning "Found insecure directories:"
     echo "$insecure_dirs"
     echo ""
-    
+
     _log_info "Fixing permissions (removing group/other write permissions)..."
-    
-    # Fix permissions
+
     if echo "$insecure_dirs" | xargs -I {} chmod g-w,o-w {} 2>/dev/null; then
         _log_success "Permissions fixed"
     else
         _log_error "Failed to fix permissions (may require sudo)"
-        _log_info "Try: compaudit | xargs sudo chmod g-w,o-w"
+        _log_info "Try: zsh -c 'autoload -Uz compaudit && compaudit' | xargs sudo chmod g-w,o-w"
         return 1
     fi
-    
+
     # Verify
     echo ""
     _log_info "Verifying fix..."
     local remaining
-    remaining=$(compaudit 2>&1 || true)
-    
+    remaining=$(zsh -c 'autoload -Uz compaudit && compaudit' 2>&1 || true)
+
     if [[ -z "$remaining" ]]; then
         _log_success "All issues resolved!"
     else
@@ -561,7 +564,7 @@ COMMANDS:
     update              Update nix profile and nix-env packages
     preview-nix-upgrade Preview Nix CLI upgrade (dry-run, shows downgrade warnings)
     cleanup             Run garbage collection and store optimisation
-    fix-compaudit       Fix Oh My Zsh insecure completion directory permissions
+    fix-compaudit       Fix zsh insecure completion directory permissions
     help                Show this help message
 
 EXAMPLES:
@@ -577,7 +580,7 @@ EXAMPLES:
     # Check for Nix CLI updates (may show downgrade warning)
     ./scripts/nix-macos-maintenance.sh preview-nix-upgrade
 
-    # Fix Oh My Zsh permissions
+    # Fix zsh completion permissions
     ./scripts/nix-macos-maintenance.sh fix-compaudit
 
 Nix is integrated with macsmith: 'update', 'verify', and 'versions' commands

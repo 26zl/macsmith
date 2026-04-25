@@ -411,26 +411,6 @@ install_homebrew() {
   fi
 }
 
-# Function to install Oh My Zsh
-install_oh_my_zsh() {
-  if [[ ! -d "$HOME/.oh-my-zsh" ]]; then
-    echo "${YELLOW}📦 Installing Oh My Zsh...${NC}"
-    local omz_installer
-    omz_installer="$(_curl_safe -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-    if [[ -z "$omz_installer" ]]; then
-      warn "Oh My Zsh installer download failed (empty response)"
-      return 1
-    fi
-    if sh -c "$omz_installer" "" --unattended --keep-zshrc; then
-      echo "${GREEN}✅ Oh My Zsh installed${NC}"
-    else
-      warn "Oh My Zsh installation failed"
-    fi
-  else
-    echo "${GREEN}✅ Oh My Zsh already installed${NC}"
-  fi
-}
-
 # Function to install Starship prompt
 install_starship() {
   HOMEBREW_PREFIX="$(_detect_brew_prefix)"
@@ -472,32 +452,35 @@ install_starship() {
   fi
 }
 
-# Function to install ZSH plugins
+# Function to install ZSH plugins via Homebrew (sourced by zsh.sh from
+# $HOMEBREW_PREFIX/share/<plugin>/<plugin>.zsh — no Oh My Zsh required).
 install_zsh_plugins() {
-  local plugins_dir="$HOME/.oh-my-zsh/custom/plugins"
-  
-  # zsh-syntax-highlighting
-  if [[ ! -d "$plugins_dir/zsh-syntax-highlighting" ]]; then
-    echo "${YELLOW}📦 Installing zsh-syntax-highlighting...${NC}"
-    if git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "$plugins_dir/zsh-syntax-highlighting"; then
-      echo "${GREEN}✅ zsh-syntax-highlighting installed${NC}"
-    else
-      warn "zsh-syntax-highlighting installation failed"
-    fi
-  else
-    echo "${GREEN}✅ zsh-syntax-highlighting already installed${NC}"
+  HOMEBREW_PREFIX="$(_detect_brew_prefix)"
+  if [[ -z "$HOMEBREW_PREFIX" ]] || [[ ! -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
+    warn "Homebrew not available — skipping zsh plugins"
+    return 1
   fi
-  
-  # zsh-autosuggestions
-  if [[ ! -d "$plugins_dir/zsh-autosuggestions" ]]; then
-    echo "${YELLOW}📦 Installing zsh-autosuggestions...${NC}"
-    if git clone https://github.com/zsh-users/zsh-autosuggestions.git "$plugins_dir/zsh-autosuggestions"; then
-      echo "${GREEN}✅ zsh-autosuggestions installed${NC}"
+  local brew="$HOMEBREW_PREFIX/bin/brew"
+  local pkg
+  for pkg in zsh-syntax-highlighting zsh-autosuggestions; do
+    if "$brew" list --formula "$pkg" >/dev/null 2>&1; then
+      echo "${GREEN}✅ $pkg already installed${NC}"
     else
-      warn "zsh-autosuggestions installation failed"
+      echo "${YELLOW}📦 Installing $pkg via Homebrew...${NC}"
+      local err=""
+      if err="$( { "$brew" install "$pkg" </dev/null >/dev/null; } 2>&1 )"; then
+        echo "${GREEN}✅ $pkg installed${NC}"
+      else
+        warn "$pkg installation failed$(_brew_fail_hint "$err")"
+      fi
     fi
-  else
-    echo "${GREEN}✅ zsh-autosuggestions already installed${NC}"
+  done
+
+  # One-time notice for users upgrading from the OMZ era. The new zsh.sh no
+  # longer sources ~/.oh-my-zsh, so the directory is leftover bytes.
+  if [[ -d "$HOME/.oh-my-zsh" ]]; then
+    echo "  ${BLUE}INFO:${NC} Old ~/.oh-my-zsh/ from a previous install is no longer used."
+    echo "  ${BLUE}INFO:${NC} Safe to remove with: rm -rf ~/.oh-my-zsh"
   fi
 }
 
@@ -1117,9 +1100,9 @@ install_sysadmin_tools() {
   # mole is a macOS cleaner CLI (AppCleaner-style leftover detection) from
   # the tw93/tap tap — handy for everyone, hence in this profile.
   local poweruser=(
-    btop ncdu dust duf
+    btop dust
     ripgrep bat eza fd zoxide
-    jq yq tree tldr watch
+    jq yq tree tlrc watch
     gh lazygit
     mtr bandwhich
     direnv shellcheck shfmt pre-commit
@@ -1138,8 +1121,9 @@ install_sysadmin_tools() {
   local netsec_formulae=(nmap masscan iperf3)
   local netsec_casks=(wireshark-app)
 
-  # DevOps / SRE tooling. Free container runtime via colima; OrbStack cask
-  # as a fast proprietary alternative to Docker Desktop.
+  # DevOps / SRE tooling. OrbStack (cask) is the container runtime; we
+  # keep the docker / docker-compose formulae as the CLI clients in case
+  # OrbStack isn't running.
   local devops_formulae=(
     # k8s
     kubernetes-cli helm k9s kubectx kustomize stern
@@ -1149,8 +1133,8 @@ install_sysadmin_tools() {
     awscli azure-cli doctl
     # GitOps / CI
     argocd skaffold
-    # Container runtime (colima) + docker CLI
-    colima docker docker-compose
+    # docker CLI (daemon comes from OrbStack)
+    docker docker-compose
   )
   local devops_casks=(google-cloud-sdk orbstack multipass)
 
@@ -1164,7 +1148,7 @@ install_sysadmin_tools() {
   # [current/total] progress prefix. </dev/null isolates brew from the caller's
   # stdin so piped answers to _ask_user survive across brew invocations.
   # The visible progress counter reduces premature Ctrl-C on long batches
-  # (power-user is 22 formulae) — users can see something is still happening.
+  # (power-user is 24 formulae) — users can see something is still happening.
   _brew_batch() {
     local label="$1"; shift
     local total=$#
@@ -1414,10 +1398,9 @@ install_zsh_config() {
 
     # Alias/export harvest: on fresh installs, pull user-defined aliases and
     # exports from the old .zshrc into ~/.zshrc.local so they survive the
-    # overwrite. Managed config lines (starting with our marker or obvious
-    # OMZ boilerplate) are skipped. Only runs if no marker existed AND
-    # ~/.zshrc.local has never been harvested, to avoid appending duplicates
-    # on a crashed-then-rerun install.
+    # overwrite. Managed config lines (starting with our marker) are skipped.
+    # Only runs if no marker existed AND ~/.zshrc.local has never been
+    # harvested, to avoid appending duplicates on a crashed-then-rerun install.
     local _already_harvested=false
     if [[ -f "$HOME/.zshrc.local" ]] && grep -q '^# Harvested from ' "$HOME/.zshrc.local" 2>/dev/null; then
       _already_harvested=true
@@ -1614,7 +1597,6 @@ main() {
   if ! refresh_environment; then echo "${RED}❌ Critical: Environment refresh failed${NC}"; exit 1; fi
 
   # Optional installations (can fail)
-  install_oh_my_zsh || warn "Oh My Zsh installation failed"
   install_starship || warn "Starship prompt installation failed"
   install_zsh_plugins || warn "ZSH plugins installation failed"
   install_fzf || warn "FZF installation failed"

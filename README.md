@@ -67,14 +67,14 @@ Everything optional is behind a y/n prompt with a sensible default (press Enter 
 
 **Installed automatically** (core shell foundation):
 
-- Xcode Command Line Tools, Homebrew, Oh My Zsh (plugins-only), Starship prompt, zsh-syntax-highlighting, zsh-autosuggestions, FZF
+- Xcode Command Line Tools, Homebrew, Starship prompt, zsh-syntax-highlighting, zsh-autosuggestions (both via Homebrew, no Oh My Zsh), FZF
 - The `macsmith` maintenance binary at `~/.local/bin/macsmith`
 - A managed `~/.zshrc` (your existing one is backed up with a timestamp)
 
 **Asked per tool during `./install.sh`**:
 
 - macOS package sources: `mas` **[N]**, `MacPorts` **[N]**, `Nix` **[N]**
-- Sysadmin profiles: power-user CLI **[Y]** (btop, ripgrep, bat, gh, lazygit, tmux, neovim, …), crypto/secrets **[Y]** (age, sops, gnupg, pinentry-mac), netsec **[N]** (nmap, masscan, iperf3, Wireshark), devops/SRE **[N]** (kubectl, Terraform via HashiCorp tap, ansible, awscli, colima, orbstack, …), databases **[N]** (mysql, postgresql)
+- Sysadmin profiles: power-user CLI **[Y]** (btop, ripgrep, bat, gh, lazygit, tmux, neovim, …), crypto/secrets **[Y]** (age, sops, gnupg, pinentry-mac), netsec **[N]** (nmap, masscan, iperf3, Wireshark), devops/SRE **[N]** (kubectl, Terraform via HashiCorp tap, ansible, awscli, orbstack, …), databases **[N]** (mysql, postgresql)
 
 **Asked per tool during `./dev-tools.sh`**:
 
@@ -99,12 +99,11 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 
 **Written only if you say yes** (per-tool `[Y]`/`[N]` prompt):
 
-- **Oh My Zsh** → `~/.oh-my-zsh/` (uses its own installer when missing; we never touch an existing install).
 - **Homebrew packages**, by profile:
-  - `power-user` **[Y]**: 26 formulae (btop, ripgrep, bat, gh, lazygit, tmux, neovim, chezmoi, …)
+  - `power-user` **[Y]**: 24 formulae (btop, ripgrep, bat, gh, lazygit, tmux, neovim, chezmoi, …)
   - `crypto/secrets` **[Y]**: 4 formulae (age, sops, gnupg, pinentry-mac)
   - `netsec` **[N]**: 3 formulae + 1 cask (nmap, masscan, iperf3, Wireshark app) — strictly network-layer tools; web-app / DB-exploit scanners are deliberately excluded
-  - `devops/SRE` **[N]**: 18 formulae + 3 casks (kubectl, Terraform via `hashicorp/tap`, ansible, awscli, colima, docker, orbstack, google-cloud-sdk, multipass, …)
+  - `devops/SRE` **[N]**: 17 formulae + 3 casks (kubectl, Terraform via `hashicorp/tap`, ansible, awscli, docker, orbstack, google-cloud-sdk, multipass, …)
   - `databases` **[N]**: 2 formulae (mysql, postgresql@17)
 - **Language toolchains** (via `./dev-tools.sh`, each one its own `[Y]`/`[N]` prompt):
   - Python → `~/.pyenv/`
@@ -127,7 +126,7 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 
 **Reversing it**:
 
-- `uninstall-macsmith` — removes the 3 binaries, `~/.local/share/macsmith/`, the managed `.zprofile` block, and offers to restore `~/.zshrc` from the oldest non-macsmith backup. Does NOT touch Homebrew, OMZ, or language toolchains.
+- `uninstall-macsmith` — removes the 3 binaries, `~/.local/share/macsmith/`, the managed `.zprofile` block, and offers to restore `~/.zshrc` from the oldest non-macsmith backup. Does NOT touch Homebrew or language toolchains.
 - `uninstall-profile <name>` — `brew uninstall` a sysadmin profile's formulae + casks.
 - `uninstall-nix` — full Nix removal including the APFS volume (the volume-delete step always requires typing `yes` — `--yes` on everything else, never there).
 - Language toolchains: removed by their own tools (`rm -rf ~/.pyenv`, `brew uninstall go`, `rustup self uninstall`, …).
@@ -175,7 +174,7 @@ Two bundled scripts, both defensive with `--dry-run` and `--yes` flags. Run `--d
 
 ### Remove macsmith itself
 
-`uninstall-macsmith` removes what macsmith installed (binaries in `~/.local/bin/`, `~/.local/share/macsmith/`, the managed PATH block in `~/.zprofile`) and offers to restore `~/.zshrc` from the oldest non-macsmith-managed backup (skips `.zshrc.backup.*` files that look like they were made by a prior macsmith run so you get your original pre-macsmith config, not a macsmith template). Also offers to remove `~/.config/starship.toml`. It **keeps** Homebrew, any installed formulae/casks, Oh My Zsh, language toolchains (pyenv/nvm/chruby/rustup/swiftly/go/…), `~/.zshrc.local`, and every file you created.
+`uninstall-macsmith` removes what macsmith installed (binaries in `~/.local/bin/`, `~/.local/share/macsmith/`, the managed PATH block in `~/.zprofile`) and offers to restore `~/.zshrc` from the oldest non-macsmith-managed backup (skips `.zshrc.backup.*` files that look like they were made by a prior macsmith run so you get your original pre-macsmith config, not a macsmith template). Also offers to remove `~/.config/starship.toml`. It **keeps** Homebrew, any installed formulae/casks, language toolchains (pyenv/nvm/chruby/rustup/swiftly/go/…), `~/.zshrc.local`, and every file you created.
 
 ```bash
 uninstall-macsmith --dry-run     # show what will change

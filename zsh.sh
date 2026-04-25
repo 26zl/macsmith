@@ -1,14 +1,8 @@
 #!/usr/bin/env zsh
 
 # Prompt: Starship is initialized at the end of this file, after PATH setup.
-# Oh My Zsh is used for plugins only; its theme is disabled so Starship wins.
-
-export ZSH="$HOME/.oh-my-zsh"
-export ZSH_THEME=""
-export plugins=(git zsh-syntax-highlighting zsh-autosuggestions)
-
-# Guard against partial installs: if OMZ install failed, don't break shell startup.
-[[ -f "$ZSH/oh-my-zsh.sh" ]] && source "$ZSH/oh-my-zsh.sh"
+# zsh plugins (syntax-highlighting, autosuggestions) are sourced near the end
+# from Homebrew directly — no Oh My Zsh, no clones in $HOME.
 
 # ================================ PATH =====================================
 # Detect Homebrew installation prefix
@@ -305,7 +299,11 @@ if ! command -v conda >/dev/null 2>&1; then
 fi
 
 # ================================ ALIASES ==================================
-if command -v colorls >/dev/null 2>&1; then
+# eza is installed by the power-user profile; prefer it when present.
+# colorls (Ruby gem, user-installed) is a fallback for users who already had it.
+if command -v eza >/dev/null 2>&1; then
+  alias ls='eza --color=auto --group-directories-first'
+elif command -v colorls >/dev/null 2>&1; then
   alias ls='colorls'
 else
   alias ls='ls -G'
@@ -316,6 +314,22 @@ alias reloadzsh="source ${ZDOTDIR:-$HOME}/.zshrc"
 alias reload="source ${ZDOTDIR:-$HOME}/.zprofile && source ${ZDOTDIR:-$HOME}/.zshrc"
 if command -v cot >/dev/null 2>&1; then
   alias change="cot ${ZDOTDIR:-$HOME}/.zshrc"
+fi
+
+# Git aliases (replacing the OMZ git plugin's most-used shortcuts).
+if command -v git >/dev/null 2>&1; then
+  alias gst='git status'
+  alias gd='git diff'
+  alias gds='git diff --staged'
+  alias gp='git push'
+  alias gpl='git pull'
+  alias gf='git fetch'
+  alias gb='git branch'
+  alias gco='git checkout'
+  alias gcb='git checkout -b'
+  alias gcm='git commit -m'
+  alias gca='git commit --amend'
+  alias glog='git log --oneline --graph --decorate'
 fi
 
 # MySQL aliases - detect MySQL installation dynamically
@@ -436,7 +450,7 @@ fi
 # Standalone uninstallers shipped with macsmith. Installed by install.sh
 # to ~/.local/bin/ so aliases work even after the bootstrap temp clone is
 # wiped. `uninstall-nix` removes Nix cleanly; `uninstall-macsmith` removes
-# what macsmith itself installed (keeping Homebrew / language tools / OMZ).
+# what macsmith itself installed (keeping Homebrew and language toolchains).
 uninstall_nix_bin="$HOME/.local/bin/uninstall-nix-macos"
 if [[ -x "$uninstall_nix_bin" ]]; then
   alias uninstall-nix="$uninstall_nix_bin"
@@ -453,9 +467,21 @@ if [[ -f "$HOME/.swiftly/env.sh" ]]; then
 fi
 
 # ================================ FZF ======================================
-fzf_config="${XDG_CONFIG_HOME:-$HOME/.config}/fzf/fzf.zsh"
-[[ -f "$fzf_config" ]] || fzf_config="$HOME/.fzf.zsh"
-[[ -f "$fzf_config" ]] && source "$fzf_config"
+# Source fzf key-bindings + completions directly from Homebrew so users don't
+# have to run $(brew --prefix)/opt/fzf/install manually. Falls back to the
+# legacy ~/.fzf.zsh / $XDG_CONFIG_HOME path for users who already ran the
+# fzf installer themselves.
+HOMEBREW_PREFIX="$(_detect_brew_prefix)"
+if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -d "$HOMEBREW_PREFIX/opt/fzf/shell" ]]; then
+  [[ -f "$HOMEBREW_PREFIX/opt/fzf/shell/key-bindings.zsh" ]] && \
+    source "$HOMEBREW_PREFIX/opt/fzf/shell/key-bindings.zsh"
+  [[ -f "$HOMEBREW_PREFIX/opt/fzf/shell/completion.zsh" ]] && \
+    source "$HOMEBREW_PREFIX/opt/fzf/shell/completion.zsh"
+else
+  fzf_config="${XDG_CONFIG_HOME:-$HOME/.config}/fzf/fzf.zsh"
+  [[ -f "$fzf_config" ]] || fzf_config="$HOME/.fzf.zsh"
+  [[ -f "$fzf_config" ]] && source "$fzf_config"
+fi
 
 # ================================ UPDATE CHECK =============================
 # Check for macsmith updates (async, max once per 24h).
@@ -520,6 +546,23 @@ if [[ -n "$HOMEBREW_PREFIX" ]]; then
 else
   # No Homebrew, just clean normally
   export PATH="$(_clean_path)" >/dev/null 2>&1
+fi
+
+# ================================ TOOL HOOKS ===============================
+# zoxide and direnv require shell hooks to function — without them the
+# binaries are dead weight on disk.
+command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init zsh)"
+command -v direnv >/dev/null 2>&1 && eval "$(direnv hook zsh)"
+
+# ================================ ZSH PLUGINS ==============================
+# zsh-syntax-highlighting and zsh-autosuggestions, sourced directly from
+# Homebrew. Per their docs both must be sourced *after* every other shell
+# config so they can hook ZLE widgets correctly.
+if [[ -n "$HOMEBREW_PREFIX" ]]; then
+  [[ -f "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]] && \
+    source "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+  [[ -f "$HOMEBREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] && \
+    source "$HOMEBREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
 fi
 
 # ================================ STARSHIP PROMPT ==========================
