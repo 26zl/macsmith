@@ -74,7 +74,7 @@ Everything optional is behind a y/n prompt with a sensible default (press Enter 
 **Asked per tool during `./install.sh`**:
 
 - macOS package sources: `mas` **[N]**, `MacPorts` **[N]**, `Nix` **[N]**
-- Sysadmin profiles: power-user CLI **[Y]** (btop, ripgrep, bat, gh, lazygit, tmux, neovim, …), crypto/secrets **[Y]** (age, sops, gnupg, 1password-cli), netsec **[N]** (nmap, masscan, iperf3, Wireshark), devops/SRE **[N]** (kubectl, Terraform via HashiCorp tap, ansible, awscli, colima, orbstack, …), databases **[N]** (mysql, postgresql)
+- Sysadmin profiles: power-user CLI **[Y]** (btop, ripgrep, bat, gh, lazygit, tmux, neovim, …), crypto/secrets **[Y]** (age, sops, gnupg, pinentry-mac), netsec **[N]** (nmap, masscan, iperf3, Wireshark), devops/SRE **[N]** (kubectl, Terraform via HashiCorp tap, ansible, awscli, colima, orbstack, …), databases **[N]** (mysql, postgresql)
 
 **Asked per tool during `./dev-tools.sh`**:
 
@@ -102,7 +102,7 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 - **Oh My Zsh** → `~/.oh-my-zsh/` (uses its own installer when missing; we never touch an existing install).
 - **Homebrew packages**, by profile:
   - `power-user` **[Y]**: 25 formulae (btop, ripgrep, bat, gh, lazygit, tmux, neovim, chezmoi, …)
-  - `crypto/secrets` **[Y]**: 4 formulae + 1 cask (age, sops, gnupg, pinentry-mac, 1password-cli)
+  - `crypto/secrets` **[Y]**: 4 formulae (age, sops, gnupg, pinentry-mac)
   - `netsec` **[N]**: 3 formulae + 1 cask (nmap, masscan, iperf3, Wireshark app) — strictly network-layer tools; web-app / DB-exploit scanners are deliberately excluded
   - `devops/SRE` **[N]**: 18 formulae + 3 casks (kubectl, Terraform via `hashicorp/tap`, ansible, awscli, colima, docker, orbstack, google-cloud-sdk, multipass, …)
   - `databases` **[N]**: 2 formulae (mysql, postgresql@17)

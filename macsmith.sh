@@ -3965,7 +3965,7 @@ Valid profiles:
                tree, tldr, watch, gh, lazygit, mtr, bandwhich, direnv,
                shellcheck, shfmt, pre-commit, tmux, neovim, chezmoi,
                tw93/tap/mole
-  crypto       age, sops, gnupg, pinentry-mac, 1password-cli (cask)
+  crypto       age, sops, gnupg, pinentry-mac
   netsec       nmap, masscan, iperf3, wireshark-app (cask)
   devops       kubernetes-cli, helm, k9s, kubectx, kustomize, stern,
                hashicorp/tap/terraform, terragrunt, tflint, ansible, awscli, azure-cli,
@@ -3992,7 +3992,6 @@ EOF
       ;;
     crypto)
       formulae=(age sops gnupg pinentry-mac)
-      casks=(1password-cli)
       ;;
     netsec)
       formulae=(nmap masscan iperf3)

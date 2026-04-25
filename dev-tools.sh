@@ -104,6 +104,9 @@ _brew_fail_hint() {
     return
   fi
   first="$(echo "$err" | /usr/bin/grep -E '^Error: ' | /usr/bin/head -n1 | /usr/bin/sed 's/^Error: *//' | /usr/bin/cut -c 1-100)"
+  if [[ -z "$first" ]]; then
+    first="$(echo "$err" | /usr/bin/grep -v '^[[:space:]]*$' | /usr/bin/tail -n1 | /usr/bin/cut -c 1-100)"
+  fi
   [[ -n "$first" ]] && echo " ($first)"
 }
 
@@ -1009,7 +1012,7 @@ install_dotnet() {
 # ============================================================================
 
 install_uv()   { _install_brew_tool uv   "uv (fast Python package manager)"  "Y"; }
-install_bun()  { _install_brew_tool bun  "bun (JS/TS runtime + pkg manager)" "Y"; }
+install_bun()  { _install_brew_tool bun  "bun (JS/TS runtime + pkg manager)" "Y" "oven-sh/bun"; }
 install_pnpm() { _install_brew_tool pnpm "pnpm (fast Node package manager)"  "Y"; }
 install_deno() { _install_brew_tool deno "deno (secure JS/TS runtime)"       "N"; }
 

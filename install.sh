@@ -141,6 +141,9 @@ _brew_fail_hint() {
     return
   fi
   first="$(echo "$err" | /usr/bin/grep -E '^Error: ' | /usr/bin/head -n1 | /usr/bin/sed 's/^Error: *//' | /usr/bin/cut -c 1-100)"
+  if [[ -z "$first" ]]; then
+    first="$(echo "$err" | /usr/bin/grep -v '^[[:space:]]*$' | /usr/bin/tail -n1 | /usr/bin/cut -c 1-100)"
+  fi
   [[ -n "$first" ]] && echo " ($first)"
 }
 
@@ -1127,7 +1130,6 @@ install_sysadmin_tools() {
 
   # Crypto & secrets tooling.
   local crypto_formulae=(age sops gnupg pinentry-mac)
-  local crypto_casks=(1password-cli)
 
   # Network tooling — strictly network-layer (L2-L4) and packet analysis.
   # Web-app / DB-exploit scanners (nikto, sqlmap) are NOT included here; they
@@ -1270,9 +1272,8 @@ install_sysadmin_tools() {
     echo "${GREEN}✅ Power-user tools installed${NC}"
   fi
 
-  if _ask_user "${YELLOW}📦 Install crypto/secrets tools (age, sops, gnupg, 1password-cli)?" "Y"; then
+  if _ask_user "${YELLOW}📦 Install crypto/secrets tools (age, sops, gnupg, pinentry-mac)?" "Y"; then
     _brew_batch "crypto" "${crypto_formulae[@]}"
-    _brew_batch_cask "crypto-casks" "${crypto_casks[@]}"
     echo "${GREEN}✅ Crypto/secrets tools installed${NC}"
   fi
 
