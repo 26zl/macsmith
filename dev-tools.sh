@@ -90,6 +90,23 @@ warn() {
   echo "${YELLOW}⚠️  $1${NC}"
 }
 
+# Extract a short, user-friendly hint from brew error output. Mirrors the same
+# helper in install.sh — duplicated by design since dev-tools.sh runs standalone.
+_brew_fail_hint() {
+  local err="$1"
+  local first=""
+  if echo "$err" | /usr/bin/grep -q "It seems there is already an App at"; then
+    echo " (existing /Applications/* — use 'brew install --cask --force <pkg>' to overwrite)"
+    return
+  fi
+  if echo "$err" | /usr/bin/grep -q "is already installed"; then
+    echo " (already installed)"
+    return
+  fi
+  first="$(echo "$err" | /usr/bin/grep -E '^Error: ' | /usr/bin/head -n1 | /usr/bin/sed 's/^Error: *//' | /usr/bin/cut -c 1-100)"
+  [[ -n "$first" ]] && echo " ($first)"
+}
+
 # Ask user for confirmation with input validation
 _ask_user() {
   local prompt="$1"
@@ -177,10 +194,14 @@ _brew_batch() {
   echo "  installing $install_count new ($skipped already present)..."
   local failed=()
   local i=1
+  local err=""
+  local hint=""
   for pkg in "${to_install[@]}"; do
     echo "  [$i/$install_count] installing $pkg..."
-    if ! "$brew" install "$pkg" </dev/null >/dev/null 2>&1; then
+    if ! err="$( { "$brew" install "$pkg" </dev/null >/dev/null; } 2>&1 )"; then
       failed+=("$pkg")
+      hint="$(_brew_fail_hint "$err")"
+      echo "    ${YELLOW}⚠️  $pkg failed${hint}${NC}"
     fi
     ((i++))
   done
@@ -212,10 +233,14 @@ _brew_batch_cask() {
   echo "  installing $install_count new cask(s) ($skipped already present)..."
   local failed=()
   local i=1
+  local err=""
+  local hint=""
   for pkg in "${to_install[@]}"; do
     echo "  [$i/$install_count] installing $pkg (cask)..."
-    if ! "$brew" install --cask "$pkg" </dev/null >/dev/null 2>&1; then
+    if ! err="$( { "$brew" install --cask "$pkg" </dev/null >/dev/null; } 2>&1 )"; then
       failed+=("$pkg")
+      hint="$(_brew_fail_hint "$err")"
+      echo "    ${YELLOW}⚠️  $pkg failed${hint}${NC}"
     fi
     ((i++))
   done
@@ -258,10 +283,11 @@ _install_brew_tool() {
     if [[ -n "$tap" ]]; then
       "$brew" tap "$tap" >/dev/null 2>&1 || warn "$display: failed to tap $tap"
     fi
-    if "$brew" install "$tool" </dev/null >/dev/null 2>&1; then
+    local err=""
+    if err="$( { "$brew" install "$tool" </dev/null >/dev/null; } 2>&1 )"; then
       echo "${GREEN}✅ $display installed${NC}"
     else
-      warn "$display installation failed"
+      warn "$display installation failed$(_brew_fail_hint "$err")"
     fi
   fi
 }
@@ -792,8 +818,17 @@ install_swiftly() {
   
   if [[ "$swiftly_installed" == true ]]; then
     echo "${GREEN}✅ swiftly already installed${NC}"
-    # Check if Swift is installed
-    if swiftly list installed 2>/dev/null | /usr/bin/grep -qE "[0-9]+\.[0-9]+"; then
+    # Check if Swift is installed. Filesystem check first because swiftly's CLI
+    # output format has shifted between versions and the old grep stopped
+    # matching — leading us into the "install" branch even when a toolchain was
+    # present (just to have swiftly itself say "already installed").
+    local _swift_installed=false
+    if [[ -d "$HOME/.swiftly/toolchains" ]] && /usr/bin/find "$HOME/.swiftly/toolchains" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | /usr/bin/grep -q .; then
+      _swift_installed=true
+    elif swiftly list installed 2>/dev/null | /usr/bin/grep -qE "[0-9]+\.[0-9]+"; then
+      _swift_installed=true
+    fi
+    if [[ "$_swift_installed" == true ]]; then
       echo "  ${BLUE}INFO:${NC} Swift versions already installed via swiftly"
     else
       echo "  ${BLUE}INFO:${NC} Installing latest Swift via swiftly..."

@@ -125,6 +125,25 @@ warn() {
   echo "${YELLOW}⚠️  $1${NC}"
 }
 
+# Extract a short, user-friendly hint from brew error output so cask/formula
+# failures don't disappear into the log without explanation. Returns either
+# " (reason)" or empty string. Keep it terse — full log is still discoverable
+# via `brew install --cask <pkg>` when the user wants details.
+_brew_fail_hint() {
+  local err="$1"
+  local first=""
+  if echo "$err" | /usr/bin/grep -q "It seems there is already an App at"; then
+    echo " (existing /Applications/* — use 'brew install --cask --force <pkg>' to overwrite)"
+    return
+  fi
+  if echo "$err" | /usr/bin/grep -q "is already installed"; then
+    echo " (already installed)"
+    return
+  fi
+  first="$(echo "$err" | /usr/bin/grep -E '^Error: ' | /usr/bin/head -n1 | /usr/bin/sed 's/^Error: *//' | /usr/bin/cut -c 1-100)"
+  [[ -n "$first" ]] && echo " ($first)"
+}
+
 # Wrapper for curl with timeouts and retry
 _curl_safe() {
   curl --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 "$@"
@@ -829,8 +848,12 @@ setup_macsmith() {
 
     # Mirror the repo into the data dir so `upgrade` + the bundled-script
     # installer can re-source helpers after the temp bootstrap clone is wiped.
+    # -ef guard avoids macOS cp "are identical" noise when sys-install re-execs
+    # this script from $DATA_DIR (then $script_dir == $data_dir).
     for script_file in install.sh dev-tools.sh bootstrap.sh zsh.sh macsmith.sh; do
-      [[ -f "$script_dir/$script_file" ]] && cp "$script_dir/$script_file" "$data_dir/$script_file"
+      if [[ -f "$script_dir/$script_file" ]] && [[ ! "$script_dir/$script_file" -ef "$data_dir/$script_file" ]]; then
+        cp "$script_dir/$script_file" "$data_dir/$script_file"
+      fi
     done
     # Helper scripts live in scripts/; copy the whole dir so uninstall-nix and
     # uninstall-macsmith survive bootstrap cleanup AND get refreshed by upgrade.
@@ -838,7 +861,7 @@ setup_macsmith() {
       mkdir -p "$data_dir/scripts"
       local helper_file
       for helper_file in nix-macos-maintenance.sh uninstall-nix-macos.sh uninstall-macsmith.sh; do
-        if [[ -f "$script_dir/scripts/$helper_file" ]]; then
+        if [[ -f "$script_dir/scripts/$helper_file" ]] && [[ ! "$script_dir/scripts/$helper_file" -ef "$data_dir/scripts/$helper_file" ]]; then
           cp "$script_dir/scripts/$helper_file" "$data_dir/scripts/$helper_file"
         fi
       done
@@ -1088,6 +1111,8 @@ install_sysadmin_tools() {
   local brew="$HOMEBREW_PREFIX/bin/brew"
 
   # Power-user CLI utilities. Small, fast, useful for everyone.
+  # mole is a macOS cleaner CLI (AppCleaner-style leftover detection) from
+  # the tw93/tap tap — handy for everyone, hence in this profile.
   local poweruser=(
     btop ncdu dust duf
     ripgrep bat eza fd zoxide
@@ -1097,6 +1122,7 @@ install_sysadmin_tools() {
     direnv shellcheck shfmt pre-commit
     tmux neovim
     chezmoi
+    tw93/tap/mole
   )
 
   # Crypto & secrets tooling.
@@ -1158,10 +1184,14 @@ install_sysadmin_tools() {
     echo "  installing $install_count new ($skipped already present)..."
     local failed=()
     local i=1
+    local err=""
+    local hint=""
     for pkg in "${to_install[@]}"; do
       echo "  [$i/$install_count] installing $pkg..."
-      if ! "$brew" install "$pkg" </dev/null >/dev/null 2>&1; then
+      if ! err="$( { "$brew" install "$pkg" </dev/null >/dev/null; } 2>&1 )"; then
         failed+=("$pkg")
+        hint="$(_brew_fail_hint "$err")"
+        echo "    ${YELLOW}⚠️  $pkg failed${hint}${NC}"
       fi
       ((i++))
     done
@@ -1170,19 +1200,43 @@ install_sysadmin_tools() {
     fi
   }
 
+  # Map cask name → the .app it ships, for casks we install. Lets us detect
+  # when a user has already installed the app manually (e.g. dragged
+  # OrbStack.app to /Applications from orbstack.com) so brew doesn't try and
+  # fail every run with "It seems there is already an App at...".
+  _cask_app_for() {
+    case "$1" in
+      orbstack)       echo "OrbStack.app" ;;
+      wireshark-app)  echo "Wireshark.app" ;;
+      multipass)      echo "Multipass.app" ;;
+      *)              echo "" ;;
+    esac
+  }
+
   _brew_batch_cask() {
     local label="$1"; shift
     local total=$#
     local skipped=0
+    local skipped_manual=()
     local to_install=()
     local pkg
+    local app=""
     for pkg in "$@"; do
       if "$brew" list --cask "$pkg" >/dev/null 2>&1; then
         ((skipped++))
-      else
-        to_install+=("$pkg")
+        continue
       fi
+      app="$(_cask_app_for "$pkg")"
+      if [[ -n "$app" ]] && { [[ -d "/Applications/$app" ]] || [[ -d "$HOME/Applications/$app" ]]; }; then
+        skipped_manual+=("$pkg")
+        ((skipped++))
+        continue
+      fi
+      to_install+=("$pkg")
     done
+    if (( ${#skipped_manual[@]} > 0 )); then
+      echo "  skipping (already installed outside brew): ${skipped_manual[*]}"
+    fi
     local install_count=${#to_install[@]}
     if (( install_count == 0 )); then
       echo "  all $total already installed (cask)"
@@ -1191,10 +1245,14 @@ install_sysadmin_tools() {
     echo "  installing $install_count new cask(s) ($skipped already present)..."
     local failed=()
     local i=1
+    local err=""
+    local hint=""
     for pkg in "${to_install[@]}"; do
       echo "  [$i/$install_count] installing $pkg (cask)..."
-      if ! "$brew" install --cask "$pkg" </dev/null >/dev/null 2>&1; then
+      if ! err="$( { "$brew" install --cask "$pkg" </dev/null >/dev/null; } 2>&1 )"; then
         failed+=("$pkg")
+        hint="$(_brew_fail_hint "$err")"
+        echo "    ${YELLOW}⚠️  $pkg failed${hint}${NC}"
       fi
       ((i++))
     done
@@ -1206,7 +1264,8 @@ install_sysadmin_tools() {
   echo ""
   echo "${BLUE}=== Extra tooling (profiles) ===${NC}"
 
-  if _ask_user "${YELLOW}📦 Install power-user CLI (btop, gh, lazygit, ripgrep, bat, jq, chezmoi, neovim, ...)?" "Y"; then
+  if _ask_user "${YELLOW}📦 Install power-user CLI (btop, gh, lazygit, ripgrep, bat, jq, chezmoi, neovim, mole, ...)?" "Y"; then
+    echo "  ${BLUE}INFO:${NC} mole is provided by the tw93/tap Homebrew tap"
     _brew_batch "power-user" "${poweruser[@]}"
     echo "${GREEN}✅ Power-user tools installed${NC}"
   fi

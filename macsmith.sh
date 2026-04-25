@@ -1192,9 +1192,11 @@ EOF
       if echo "$brew_upgrade_formula_output" | grep -qiE "(Already up-to-date|Nothing to upgrade|All formulae are up to date|No outdated packages|0 outdated packages)"; then
         echo "  ${BLUE}INFO:${NC} Homebrew formulae are already up to date"
       else
-        # Extract what was upgraded (handles both "==> Upgrading foo" and "==> Upgrading 1 outdated package: foo")
+        # Extract what was upgraded. Brew prints both a "==> Upgrading N
+        # outdated packages:" header and per-package "==> Upgrading <name>"
+        # lines — drop the header so the count and list reflect packages only.
         local upgraded_list=""
-        upgraded_list="$(echo "$brew_upgrade_formula_output" | grep -E '^==> Upgrading' | sed -E 's/^==> Upgrading ([0-9]+ outdated packages?: )?//' || true)"
+        upgraded_list="$(echo "$brew_upgrade_formula_output" | grep -E '^==> Upgrading ' | grep -vE '^==> Upgrading [0-9]+ outdated packages?:[[:space:]]*$' | sed -E 's/^==> Upgrading //' || true)"
         if [[ -n "$upgraded_list" ]]; then
           brew_formula_upgraded=true
           local upgraded_count
@@ -1219,9 +1221,9 @@ EOF
       if echo "$brew_upgrade_cask_output" | grep -qiE "(Already up-to-date|Nothing to upgrade|All casks are up to date|No outdated casks|0 outdated casks)"; then
         echo "  ${BLUE}INFO:${NC} Homebrew casks are already up to date"
       else
-        # Extract what was upgraded (handles both "==> Upgrading foo" and "==> Upgrading 1 outdated package: foo")
+        # Same header-line filter as the formula path above.
         local upgraded_cask_list=""
-        upgraded_cask_list="$(echo "$brew_upgrade_cask_output" | grep -E '^==> Upgrading' | sed -E 's/^==> Upgrading ([0-9]+ outdated packages?: )?//' || true)"
+        upgraded_cask_list="$(echo "$brew_upgrade_cask_output" | grep -E '^==> Upgrading ' | grep -vE '^==> Upgrading [0-9]+ outdated packages?:[[:space:]]*$' | sed -E 's/^==> Upgrading //' || true)"
         if [[ -n "$upgraded_cask_list" ]]; then
           brew_cask_upgraded=true
           local upgraded_cask_count
@@ -3136,13 +3138,22 @@ verify() {
       ok "$_tool" "$("$_tool" --version 2>/dev/null | head -n1)"
     fi
   done
-  # JVM ecosystem (opt-in batch in dev-tools.sh)
+  # JVM ecosystem (opt-in batch in dev-tools.sh).
+  # kotlin writes the version to stderr; gradle's first stdout line is blank
+  # (the actual "Gradle X.Y" line is further down). Per-tool detection so all
+  # six render a real version instead of "OK ()".
+  local _ver=""
   for _tool in kotlin scala clojure gradle mvn groovy; do
     if command -v "$_tool" >/dev/null 2>&1; then
-      ok "$_tool" "$("$_tool" --version 2>/dev/null | head -n1)"
+      case "$_tool" in
+        kotlin) _ver="$(kotlin -version 2>&1 | head -n1)" ;;
+        gradle) _ver="$(gradle --version 2>&1 | grep -E '^Gradle ' | head -n1)" ;;
+        *)      _ver="$("$_tool" --version 2>/dev/null | head -n1)" ;;
+      esac
+      ok "$_tool" "$_ver"
     fi
   done
-  unset _tool
+  unset _tool _ver
 
   # One-line summary so users don't have to scroll the list to see overall status
   local _verify_total=$((_verify_ok + _verify_warn + _verify_miss))
@@ -3486,12 +3497,12 @@ versions() {
     local mas_app_count
     mas_app_count=$(mas list 2>/dev/null | wc -l | tr -d ' ' || echo "0")
     if [[ "$mas_app_count" -gt 0 ]]; then
-      echo "mas ............. $mas_version ($mas_app_count App Store apps)"
+      echo "mas ............ $mas_version ($mas_app_count App Store apps)"
     else
-      echo "mas ............. $mas_version (no App Store apps)"
+      echo "mas ............ $mas_version (no App Store apps)"
     fi
   else
-    echo "mas ............. not installed"
+    echo "mas ............ not installed"
     echo "  To install: 'sys-install'"
   fi
 
@@ -3513,12 +3524,12 @@ versions() {
       elif [[ "$env_count" -gt 0 ]]; then
         pkg_info="env:$env_count"
       fi
-      echo "Nix ............. $nix_version ($total_count packages: $pkg_info)"
+      echo "Nix ............ $nix_version ($total_count packages: $pkg_info)"
     else
-      echo "Nix ............. $nix_version (0 packages)"
+      echo "Nix ............ $nix_version (0 packages)"
     fi
   else
-    echo "Nix ............. not installed"
+    echo "Nix ............ not installed"
     echo "  To install: 'sys-install'"
   fi
 
@@ -3552,13 +3563,20 @@ versions() {
       printf '%-15s %s\n' "$_tool" "$("$_tool" --version 2>/dev/null | head -n1)"
     fi
   done
-  # JVM ecosystem (opt-in batch in dev-tools.sh)
+  # JVM ecosystem (opt-in batch in dev-tools.sh). See verify() for why kotlin
+  # and gradle need special-casing.
+  local _ver=""
   for _tool in kotlin scala clojure gradle mvn groovy; do
     if command -v "$_tool" >/dev/null 2>&1; then
-      printf '%-15s %s\n' "$_tool" "$("$_tool" --version 2>/dev/null | head -n1)"
+      case "$_tool" in
+        kotlin) _ver="$(kotlin -version 2>&1 | head -n1)" ;;
+        gradle) _ver="$(gradle --version 2>&1 | grep -E '^Gradle ' | head -n1)" ;;
+        *)      _ver="$("$_tool" --version 2>/dev/null | head -n1)" ;;
+      esac
+      printf '%-15s %s\n' "$_tool" "$_ver"
     fi
   done
-  unset _tool
+  unset _tool _ver
 
   echo "${GREEN}===================================================${NC}"
   return 0
@@ -3945,7 +3963,8 @@ Usage: macsmith uninstall-profile <name>
 Valid profiles:
   power-user   btop, ncdu, dust, duf, ripgrep, bat, eza, fd, zoxide, jq, yq,
                tree, tldr, watch, gh, lazygit, mtr, bandwhich, direnv,
-               shellcheck, shfmt, pre-commit, tmux, neovim, chezmoi
+               shellcheck, shfmt, pre-commit, tmux, neovim, chezmoi,
+               tw93/tap/mole
   crypto       age, sops, gnupg, pinentry-mac, 1password-cli (cask)
   netsec       nmap, masscan, iperf3, wireshark-app (cask)
   devops       kubernetes-cli, helm, k9s, kubectx, kustomize, stern,
@@ -3969,7 +3988,7 @@ EOF
   local casks=()
   case "$profile" in
     power-user)
-      formulae=(btop ncdu dust duf ripgrep bat eza fd zoxide jq yq tree tldr watch gh lazygit mtr bandwhich direnv shellcheck shfmt pre-commit tmux neovim chezmoi)
+      formulae=(btop ncdu dust duf ripgrep bat eza fd zoxide jq yq tree tldr watch gh lazygit mtr bandwhich direnv shellcheck shfmt pre-commit tmux neovim chezmoi tw93/tap/mole)
       ;;
     crypto)
       formulae=(age sops gnupg pinentry-mac)
