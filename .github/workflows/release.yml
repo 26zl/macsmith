@@ -261,7 +261,6 @@ jobs:
             
             ### Files included
             Packaged with `git archive` respecting `.gitattributes` `export-ignore` rules.
-            Excluded from the release zip: `.github/`, `.vscode/`, `.claude/`, `.gitignore`, `.gitattributes`, `quick-test.sh`, `CLAUDE.md`.
 
             Main files:
             - `install.sh` — Shell setup installation script

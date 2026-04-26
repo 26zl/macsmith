@@ -12,6 +12,7 @@
 readonly GREEN='\033[0;32m'
 readonly BLUE='\033[0;34m'
 readonly RED='\033[0;31m'
+readonly YELLOW='\033[1;33m'
 readonly NC='\033[0m' # No Color
 
 # ================================ SYSTEM COMPATIBILITY ====================
@@ -226,18 +227,26 @@ _fix_all_ruby_gems() {
   
   # Check each gem for issues
   for gem in "${installed_gems[@]}"; do
-    # Skip default gems that can't be uninstalled
-    if gem list "$gem" | grep -q "default"; then
+    # Skip default gems that can't be uninstalled. Match the exact
+    # "default: X.Y.Z" annotation in `gem list <gem>` output instead of a
+    # bare "default" substring — the latter would also match gem descriptions
+    # if `--details` were ever added, and produces false-positives for gems
+    # that happen to contain the word.
+    if gem list "$gem" 2>/dev/null | grep -qE '\(default:'; then
       ((working_gems++))
       continue
     fi
     
-    # Check if gem executable exists and works
+    # Check if gem executable exists and works.
+    # Use the gemspec's `executables` field (the authoritative list of CLI
+    # commands the gem ships) instead of grepping `gem contents` for `bin/` —
+    # the latter matches `bin/console` and `bin/setup` from the `bundle gem`
+    # template, which are dev scaffolding, not real executables. That made us
+    # reinstall pure-library gems (abbrev, nkf, syslog, ...) on every update.
     local gem_executable=""
-    local executable_path=""
-    if executable_path="$(gem contents "$gem" 2>/dev/null | grep -E "(bin/|exe/)" | head -n1)"; then
-      gem_executable="$(basename "$executable_path")"
-    fi
+    gem_executable="$(ruby -rrubygems -e \
+      'spec = (Gem::Specification.find_by_name(ARGV[0]) rescue exit); puts(spec.executables.first || "")' \
+      -- "$gem" 2>/dev/null)"
     
     # Check if gem is problematic
     local is_problematic=false
@@ -990,7 +999,9 @@ update() {
       fi
       [[ -s "$HOME/.nvm/nvm.sh" ]] && source "$HOME/.nvm/nvm.sh"
       echo "${GREEN}[Node]${NC} install + use latest LTS, bump npm"
-      nvm install --lts && nvm use --lts && npm install -g npm@latest
+      # `nvm install --lts` already activates the version; calling `nvm use
+      # --lts` afterwards would re-print "Now using node vX.Y.Z".
+      nvm install --lts && npm install -g npm@latest
       return $?
       ;;
     python|pyenv|pipx|conda)
@@ -1201,7 +1212,7 @@ EOF
           brew_formula_upgraded=true
           local upgraded_count
           upgraded_count="$(echo "$upgraded_list" | wc -l | tr -d ' ')"
-          echo "  Upgraded $upgraded_count formula(e): $(echo "$upgraded_list" | tr '\n' ', ' | sed 's/, $//')"
+          echo "  Upgraded $upgraded_count formula(e): $(echo "$upgraded_list" | paste -sd, - | sed 's/,/, /g')"
         else
           echo "  ${BLUE}INFO:${NC} Homebrew formulae checked (no changes detected)"
         fi
@@ -1228,7 +1239,7 @@ EOF
           brew_cask_upgraded=true
           local upgraded_cask_count
           upgraded_cask_count="$(echo "$upgraded_cask_list" | wc -l | tr -d ' ')"
-          echo "  Upgraded $upgraded_cask_count cask(s): $(echo "$upgraded_cask_list" | tr '\n' ', ' | sed 's/, $//')"
+          echo "  Upgraded $upgraded_cask_count cask(s): $(echo "$upgraded_cask_list" | paste -sd, - | sed 's/,/, /g')"
         else
           echo "  ${BLUE}INFO:${NC} Homebrew casks checked (no changes detected)"
         fi
@@ -1906,8 +1917,15 @@ EOF
     echo "${GREEN}[Node]${NC} Ensuring latest LTS..."
     local prev_nvm="$(nvm current 2>/dev/null || true)"
     nvm install --lts --latest-npm || true
-    nvm alias default 'lts/*' || true
-    nvm use default || true
+    nvm alias default 'lts/*' >/dev/null 2>&1 || true
+    # `nvm install --lts` already activates the version; only run `nvm use
+    # default` if `default` resolves to a different version, otherwise it
+    # prints a redundant "Now using node vX.Y.Z" line.
+    local default_target="$(nvm version default 2>/dev/null || true)"
+    local active_now="$(nvm current 2>/dev/null || true)"
+    if [[ -n "$default_target" && "$default_target" != "$active_now" ]]; then
+      nvm use default || true
+    fi
     local active_nvm="$(nvm current 2>/dev/null || true)"
     # Only reinstall packages if we switched to a different version
     if [[ -n "$prev_nvm" && "$prev_nvm" != "system" && -n "$active_nvm" && "$prev_nvm" != "$active_nvm" ]]; then
@@ -2378,10 +2396,17 @@ EOF
     echo "  Setting default toolchain to stable..."
     rustup default stable 2>/dev/null || rust_errors+=("default_toolchain")
     
-    # Add common rustup components if not already installed
+    # Add common rustup components if not already installed.
+    # `rustup component add` prints "info: component 'X' is up to date" when
+    # nothing changes; capture stdout/stderr and only report success if the
+    # output mentions an installation/update.
     echo "  Ensuring rustup components are installed..."
-    if rustup component add rustfmt clippy 2>/dev/null; then
+    local rustup_component_output=""
+    rustup_component_output="$(rustup component add rustfmt clippy 2>&1)" || true
+    if echo "$rustup_component_output" | grep -qE "^(installing|info: installing)"; then
       echo "    Components added/updated"
+    else
+      echo "  ${BLUE}INFO:${NC} rustup components already up to date"
     fi
     
     # Report Rust issues
