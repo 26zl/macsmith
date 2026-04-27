@@ -841,42 +841,45 @@ _go_update_toolchain() {
           [[ "$tool_name" == "go" ]] && continue
           
           # Try to get module path from binary using go version -m
-          local module_path=""
+          # NOTE: do not name this `module_path` — that's a zsh tied array
+          # (MODULE_PATH) and re-declaring it as a scalar on the second loop
+          # iteration triggers `inconsistent type for assignment`.
+          local mod_path=""
           local module_info=$(go version -m "$binary" 2>/dev/null | grep -E "^[[:space:]]*mod[[:space:]]+" | head -1 || echo "")
-          
+
           if [[ -n "$module_info" ]]; then
             # Extract module path (format: "mod    path/to/module    version")
-            module_path=$(echo "$module_info" | awk '{print $2}')
+            mod_path=$(echo "$module_info" | awk '{print $2}')
           fi
-          
+
           # If we couldn't get module path, skip this tool
-          if [[ -z "$module_path" ]]; then
+          if [[ -z "$mod_path" ]]; then
             ((tools_skipped++))
             continue
           fi
-          
+
           # Skip standard library modules
-          if [[ "$module_path" == std* ]] || [[ "$module_path" == cmd/* ]] || [[ "$module_path" == "main" ]]; then
+          if [[ "$mod_path" == std* ]] || [[ "$mod_path" == cmd/* ]] || [[ "$mod_path" == "main" ]]; then
             ((tools_skipped++))
             continue
           fi
-          
+
           ((tools_found++))
-          echo "    Checking $tool_name ($module_path)..."
-          
+          echo "    Checking $tool_name ($mod_path)..."
+
           # Try to update the tool by trying different common paths
           local updated=false
-          
+
           # Try 1: Direct module path (if it's already a command path)
-          if go install "${module_path}@latest" 2>/dev/null; then
+          if go install "${mod_path}@latest" 2>/dev/null; then
             updated=true
           else
             # Try 2: Module path + /cmd/toolname
-            if go install "${module_path}/cmd/${tool_name}@latest" 2>/dev/null; then
+            if go install "${mod_path}/cmd/${tool_name}@latest" 2>/dev/null; then
               updated=true
             else
               # Try 3: Module path + /toolname
-              if go install "${module_path}/${tool_name}@latest" 2>/dev/null; then
+              if go install "${mod_path}/${tool_name}@latest" 2>/dev/null; then
                 updated=true
               fi
             fi
