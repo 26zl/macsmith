@@ -975,19 +975,22 @@ setup_zprofile_path_cleanup() {
   local zprofile_start_re='^# =+ FINAL PATH CLEANUP \(FOR \.ZPROFILE\) =+$'
   local zprofile_end_re='^# End macsmith managed block$'
 
-  # Check if a complete managed block already exists. Older macsmith installs
-  # had the start header but no end marker, which made uninstall-macsmith unable
-  # to cleanly remove the block. Treat that legacy format as repairable instead
-  # of "already configured".
+  # If a complete managed block already exists we still rewrite it so future
+  # PATH-cleanup tweaks reach existing installs on re-run. Older installs that
+  # had the start header but no end marker are also repairable (legacy format).
+  local zprofile_has_managed=false
+  local zprofile_has_legacy=false
   if [[ -f "$zprofile_file" ]] && grep -qE "$zprofile_start_re" "$zprofile_file"; then
     if grep -qE "$zprofile_end_re" "$zprofile_file"; then
-      echo "${GREEN}✅ PATH cleanup already configured in .zprofile${NC}"
-      return 0
+      zprofile_has_managed=true
+      echo "  ${BLUE}INFO:${NC} Refreshing existing macsmith .zprofile block"
+    else
+      zprofile_has_legacy=true
+      echo "  ${YELLOW}⚠️  Found legacy macsmith .zprofile block without end marker${NC}"
+      echo "  ${BLUE}INFO:${NC} Backing it up and replacing it with the current managed block"
     fi
-    echo "  ${YELLOW}⚠️  Found legacy macsmith .zprofile block without end marker${NC}"
-    echo "  ${BLUE}INFO:${NC} Backing it up and replacing it with the current managed block"
   fi
-  
+
   # Backup .zprofile if it exists (timestamped; non-atomic but harmless — if
   # the backup itself is interrupted we simply won't overwrite the original)
   local zprofile_existing=""
@@ -995,7 +998,16 @@ setup_zprofile_path_cleanup() {
     local zprofile_backup="$zprofile_file.backup.$(date +%Y%m%d_%H%M%S)"
     cp "$zprofile_file" "$zprofile_backup"
     echo "  ${BLUE}INFO:${NC} Backed up existing .zprofile to $zprofile_backup"
-    if grep -qE "$zprofile_start_re" "$zprofile_file" && ! grep -qE "$zprofile_end_re" "$zprofile_file"; then
+    if [[ "$zprofile_has_managed" == true ]]; then
+      # Strip the existing managed block (start..end inclusive) so we can
+      # append the up-to-date version below. Trailing blank lines around the
+      # block are normalized by the printf '%s\n%s\n' below.
+      zprofile_existing="$(awk -v start_re="$zprofile_start_re" -v end_re="$zprofile_end_re" '
+        $0 ~ start_re { skip = 1; next }
+        skip && $0 ~ end_re { skip = 0; next }
+        !skip { print }
+      ' "$zprofile_file")"
+    elif [[ "$zprofile_has_legacy" == true ]]; then
       # Legacy block was intended to be the final section. Keep everything
       # before it, then append the modern bounded block below.
       zprofile_existing="$(awk -v start_re="$zprofile_start_re" '

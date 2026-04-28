@@ -184,17 +184,17 @@ cmd_status() {
         _log_success "/nix directory exists"
     else
         _log_error "/nix directory not found"
-        ((issues++))
+        issues=$((issues + 1))
     fi
-    
+
     # Check nix binary
     if [[ -f /nix/var/nix/profiles/default/bin/nix ]]; then
         _log_success "Nix binary found: /nix/var/nix/profiles/default/bin/nix"
     else
         _log_warning "Nix binary not found at expected location"
-        ((issues++))
+        issues=$((issues + 1))
     fi
-    
+
     # Check if nix is in PATH
     if command -v nix > /dev/null 2>&1; then
         local nix_path
@@ -203,9 +203,9 @@ cmd_status() {
     else
         _log_error "Nix not in PATH"
         _log_info "Run: ./scripts/nix-macos-maintenance.sh ensure-path"
-        ((issues++))
+        issues=$((issues + 1))
     fi
-    
+
     # Check version
     local version
     version=$(_get_nix_version)
@@ -213,16 +213,16 @@ cmd_status() {
         _log_success "Nix version: $version"
     else
         _log_error "Cannot determine Nix version (not in PATH)"
-        ((issues++))
+        issues=$((issues + 1))
     fi
-    
+
     # Check nix-daemon
     if _check_nix_daemon; then
         _log_success "nix-daemon is running"
     else
         _log_warning "nix-daemon is not running"
         _log_info "For multi-user installs, nix-daemon should be running"
-        ((issues++))
+        issues=$((issues + 1))
     fi
     
     # Check for determinate-nixd
@@ -267,7 +267,7 @@ cmd_status() {
         _log_success "Flakes are enabled (nix-command feature)"
     else
         _log_warning "Flakes may not be enabled"
-        ((issues++))
+        issues=$((issues + 1))
     fi
     
     # Summary

@@ -1060,8 +1060,10 @@ update() {
         echo "${RED}[.NET]${NC} dotnet not found"; return 1
       fi
       echo "${GREEN}[.NET]${NC} workload update + global tools update"
-      dotnet workload update && dotnet tool update -g --all 2>/dev/null || true
-      return $?
+      local dotnet_rc=0
+      dotnet workload update || dotnet_rc=$?
+      dotnet tool update -g --all 2>/dev/null || dotnet_rc=$((dotnet_rc | $?))
+      return $dotnet_rc
       ;;
     nix)
       if ! command -v nix >/dev/null 2>&1; then
@@ -1835,7 +1837,12 @@ EOF
       # Upgrade user-installed packages for both pyenv and Homebrew Python
       _ensure_system_path
       local outdated_packages
-      outdated_packages="$("$pybin" -m pip list --outdated --format=freeze 2>/dev/null | cut -d= -f1 || true)"
+      outdated_packages="$("$pybin" -m pip list --outdated --format=json 2>/dev/null | "$pybin" -c 'import json,sys
+try:
+    for p in json.load(sys.stdin):
+        print(p["name"])
+except Exception:
+    pass' || true)"
       if [[ -n "$outdated_packages" ]]; then
         echo "  Upgrading global packages..."
         local failed_packages=()
