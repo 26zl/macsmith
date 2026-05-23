@@ -554,22 +554,28 @@ fi
 command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init zsh)"
 command -v direnv >/dev/null 2>&1 && eval "$(direnv hook zsh)"
 
-# ================================ ZSH PLUGINS ==============================
-# zsh-syntax-highlighting and zsh-autosuggestions, sourced directly from
-# Homebrew. Per their docs both must be sourced *after* every other shell
-# config so they can hook ZLE widgets correctly.
-if [[ -n "$HOMEBREW_PREFIX" ]]; then
-  [[ -f "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]] && \
-    source "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
-  [[ -f "$HOMEBREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] && \
-    source "$HOMEBREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
-fi
-
 # ================================ STARSHIP PROMPT ==========================
-# Initialize Starship after all PATH manipulation so it can find tools.
+# Initialize Starship after all PATH manipulation so it can find tools, and
+# *before* the zsh plugins below. `starship init zsh` defines ZLE widgets for
+# prompt redraw; zsh-syntax-highlighting must wrap every existing widget, so it
+# has to be sourced last (after starship). Loading the plugins before starship
+# leaves its widgets unwrapped and causes intermittent prompt-redraw corruption
+# (stray characters, doubled prompt, misplaced cursor).
 # Fallback: if Starship isn't installed, leave the default zsh prompt.
 if command -v starship >/dev/null 2>&1; then
   eval "$(starship init zsh)"
+fi
+
+# ================================ ZSH PLUGINS ==============================
+# zsh-autosuggestions and zsh-syntax-highlighting, sourced directly from
+# Homebrew. Order is load-bearing: autosuggestions first, then
+# syntax-highlighting LAST so it can hook every ZLE widget defined above
+# (starship's and autosuggestions' included). Do not reorder.
+if [[ -n "$HOMEBREW_PREFIX" ]]; then
+  [[ -f "$HOMEBREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] && \
+    source "$HOMEBREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
+  [[ -f "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]] && \
+    source "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
 fi
 
 # User-local overrides: source ~/.zshrc.local last so user edits win.

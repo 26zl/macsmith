@@ -4119,7 +4119,23 @@ if [[ -f "$LOCK_FILE" ]]; then
   rm -f "$LOCK_FILE"
 fi
 echo $$ > "$LOCK_FILE"
-trap 'rm -f "$LOCK_FILE"' EXIT INT TERM HUP
+# shellcheck disable=SC2329  # invoked via trap below (shellcheck can't track it in this large zsh file)
+_cleanup_lock() { rm -f "$LOCK_FILE"; }
+# Ctrl-C must abort the WHOLE run, not just the current sub-step. A plain
+# `trap 'rm -f lock' INT` (the old form) cleaned the lock but did not exit, so
+# in zsh the script continued to the next update section after each ^C —
+# `update` would grind through every language toolchain even though the user
+# was hammering Ctrl-C. Mirror install.sh/dev-tools.sh: re-raise SIGINT to $$
+# so the default action terminates the process (and the parent shell sees the
+# cancel). The EXIT trap still removes the lock.
+# shellcheck disable=SC2329  # invoked via trap below (shellcheck can't track it in this large zsh file)
+_on_interrupt() {
+  trap - INT
+  _cleanup_lock
+  kill -INT $$
+}
+trap _cleanup_lock EXIT TERM HUP
+trap _on_interrupt INT
 
 # Dispatch based on command argument. For subcommands that accept arguments
 # (update target, uninstall-profile name), forward "${@:2}" so positional
