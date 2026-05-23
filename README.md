@@ -164,6 +164,17 @@ cp background/terminal-background.png ~/.config/ghostty/terminal-background.png
 
 The bundled config auto-installs macsmith's terminfo over SSH, so `xterm-ghostty: unknown terminal type` never appears on remote hosts.
 
+## Troubleshooting
+
+**Garbled glyphs in the VS Code integrated terminal** (random characters render as the wrong bitmap — `Read` → `�ead`, broken powerline separators, mangled spinner emoji). This is the WebGL renderer's glyph-atlas getting corrupted by the Nerd Font / powerline glyphs and emoji that Starship and other tools emit — not a shell-config bug. Fix it in VS Code's `settings.json`:
+
+```jsonc
+"terminal.integrated.gpuAcceleration": "canvas",
+"terminal.integrated.fontFamily": "MesloLGS NF"
+```
+
+`canvas` drops the buggy WebGL texture atlas while keeping 2D acceleration; pinning the font to an installed Nerd Font stops fallback rendering. Open a fresh terminal (or **Developer: Reload Window**) to apply. If it still corrupts, step down to `"gpuAcceleration": "off"` (pure DOM rendering, no GPU atlas at all).
+
 ## Requirements
 
 macOS 13 Ventura or later. Apple Silicon or Intel. That's it.
