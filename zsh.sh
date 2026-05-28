@@ -232,42 +232,46 @@ fi
 
 # ================================== nvm ====================================
 # Lazy load NVM to speed up shell startup
-# NVM is only sourced when nvm, node, or npm is actually invoked
+# NVM is only sourced when nvm, node, or npm is actually invoked.
+# The lazy-load body is inlined into every shim — a shared helper function
+# can mysteriously vanish from long-lived subshells (e.g. Claude Code's
+# persistent Bash tool), leaving the shims calling a non-existent helper.
+# Inlining keeps each shim self-contained.
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 
-_nvm_lazy_load() {
-  unset -f nvm node npm npx corepack
+nvm() {
+  unset -f nvm node npm npx corepack 2>/dev/null
   [[ -s "$NVM_DIR/nvm.sh" ]] && \. "$NVM_DIR/nvm.sh"
   [[ -s "$NVM_DIR/bash_completion" ]] && \. "$NVM_DIR/bash_completion"
-}
-
-nvm() {
-  _nvm_lazy_load
   nvm "$@"
 }
 
 node() {
-  _nvm_lazy_load
+  unset -f nvm node npm npx corepack 2>/dev/null
+  [[ -s "$NVM_DIR/nvm.sh" ]] && \. "$NVM_DIR/nvm.sh"
   nvm use default > /dev/null 2>&1 || true
-  node "$@"
+  command node "$@"
 }
 
 npm() {
-  _nvm_lazy_load
+  unset -f nvm node npm npx corepack 2>/dev/null
+  [[ -s "$NVM_DIR/nvm.sh" ]] && \. "$NVM_DIR/nvm.sh"
   nvm use default > /dev/null 2>&1 || true
-  npm "$@"
+  command npm "$@"
 }
 
 npx() {
-  _nvm_lazy_load
+  unset -f nvm node npm npx corepack 2>/dev/null
+  [[ -s "$NVM_DIR/nvm.sh" ]] && \. "$NVM_DIR/nvm.sh"
   nvm use default > /dev/null 2>&1 || true
-  npx "$@"
+  command npx "$@"
 }
 
 corepack() {
-  _nvm_lazy_load
+  unset -f nvm node npm npx corepack 2>/dev/null
+  [[ -s "$NVM_DIR/nvm.sh" ]] && \. "$NVM_DIR/nvm.sh"
   nvm use default > /dev/null 2>&1 || true
-  corepack "$@"
+  command corepack "$@"
 }
 
 # ================================= Rust ====================================
