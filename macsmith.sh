@@ -88,20 +88,48 @@ _is_disabled() {
   return 1
 }
 
+_project_file_marker_in_dir() {
+  local dir="${1:-${PWD:-$(pwd)}}"
+  local marker=""
+  local project_markers=(
+    .git
+    package.json package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml bun.lock bun.lockb
+    Gemfile Gemfile.lock
+    go.mod go.sum
+    requirements.txt requirements.lock pyproject.toml poetry.lock Pipfile Pipfile.lock
+    Cargo.toml Cargo.lock
+    composer.json composer.lock
+    mix.exs mix.lock
+    pom.xml build.gradle settings.gradle gradle.lockfile
+  )
+
+  for marker in "${project_markers[@]}"; do
+    if [[ -e "$dir/$marker" ]]; then
+      echo "$marker"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 # Check if we're in a project directory (not home directory)
 # Returns 0 if in project directory, 1 if in home directory or other location
 _is_project_directory() {
   local current_dir="${PWD:-$(pwd)}"
   local home_dir="${HOME:-}"
+  local project_marker=""
   
   # If we're in home directory, it's not a project (global packages are OK to update)
   if [[ "$current_dir" == "$home_dir" ]]; then
     return 1  # Not a project directory
   fi
   
-  # Check for project indicators (but not in home directory)
-  # If we have project files, we're in a project directory
-  if [[ -f "package.json" ]] || [[ -f "Gemfile" ]] || [[ -f "go.mod" ]] || [[ -f "requirements.txt" ]] || [[ -f "Cargo.toml" ]]; then
+  project_marker="$(_project_file_marker_in_dir "$current_dir")" || return 1
+
+  # Check for project indicators (but not in home directory). If we have
+  # project files, we're in a project directory.
+  if [[ -n "$project_marker" ]]; then
     # Additional check: if we're in a subdirectory of home that looks like a project
     # (e.g., ~/projects/myapp), treat it as a project
     if [[ "$current_dir" == "$home_dir"/* ]]; then
@@ -997,7 +1025,7 @@ _cargo_update_packages() {
 
 # ================================ UPDATE ===================================
 
-update() {
+_update_impl() {
   # Targeted update dispatch. `update` or `update all` runs the full monolith
   # below. Specific targets run a minimal "just this tool" path so users can
   # iterate quickly instead of waiting 5+ min for a full pass. For complex
@@ -1146,6 +1174,10 @@ Targets:
   nix                 nix profile upgrade + gc
   mas                 mas upgrade
   help                This message
+
+Environment:
+  MACSMITH_ALLOW_PROJECT_MODIFY=1  Opt in to running update from a project directory
+  MACSMITH_UPDATE_WORKDIR=DIR       Safe working directory for update package-manager calls
 EOF
       return 0
       ;;
@@ -1166,9 +1198,14 @@ EOF
 
   # Check if we're in a project directory and warn user
   if _is_project_directory; then
-    echo "  ${BLUE}INFO:${NC} Project directory detected - project files will NOT be modified"
-    echo "  ${BLUE}INFO:${NC} Only global/system packages will be updated"
-    echo "  ${BLUE}INFO:${NC} To update project dependencies, run package manager commands manually in this directory"
+    if [[ "${MACSMITH_ALLOW_PROJECT_MODIFY:-0}" == "1" ]]; then
+      echo "  ${BLUE}INFO:${NC} Project directory detected; MACSMITH_ALLOW_PROJECT_MODIFY=1 is set"
+      echo "  ${BLUE}INFO:${NC} Running update from the current directory by explicit opt-in"
+    else
+      echo "  ${BLUE}INFO:${NC} Project directory detected - project files will NOT be modified"
+      echo "  ${BLUE}INFO:${NC} Only global/system packages will be updated"
+      echo "  ${BLUE}INFO:${NC} To update project dependencies, run package manager commands manually in this directory"
+    fi
   fi
   
   # Check macOS compatibility
@@ -2808,6 +2845,83 @@ except Exception:
   return "$_update_failed"
 }
 
+_run_update_from_safe_cwd() {
+  local _target="${1:-all}"
+  case "$_target" in
+    help|-h|--help)
+      _update_impl "$@"
+      return $?
+      ;;
+    all|brew|homebrew|macports|node|nvm|npm|python|pyenv|pipx|conda|ruby|chruby|rubygems|gem|rust|rustup|cargo|swift|swiftly|go|golang|dotnet|net|nix|mas)
+      ;;
+    *)
+      _update_impl "$@"
+      return $?
+      ;;
+  esac
+
+  if [[ "${MACSMITH_ALLOW_PROJECT_MODIFY:-0}" == "1" ]]; then
+    _update_impl "$@"
+    return $?
+  fi
+
+  local _original_cwd="${PWD:-$(pwd)}"
+  local _project_marker=""
+
+  if ! _is_project_directory; then
+    _update_impl "$@"
+    return $?
+  fi
+
+  _project_marker="$(_project_file_marker_in_dir "$_original_cwd")" || _project_marker="project marker"
+
+  local _safe_cwd="${MACSMITH_UPDATE_WORKDIR:-$DATA_DIR/update-workdir}"
+
+  if ! mkdir -p "$_safe_cwd" 2>/dev/null; then
+    echo "  ${RED}ERROR:${NC} Project file '$_project_marker' detected in $_original_cwd"
+    echo "  ${RED}ERROR:${NC} Could not create safe update directory: $_safe_cwd"
+    echo "  ${BLUE}INFO:${NC} Set MACSMITH_UPDATE_WORKDIR to a writable directory, or set MACSMITH_ALLOW_PROJECT_MODIFY=1 to opt in."
+    return 1
+  fi
+
+  local _original_abs=""
+  local _safe_abs=""
+  _original_abs="$(builtin cd "$_original_cwd" 2>/dev/null && pwd -P)" || _original_abs="$_original_cwd"
+  _safe_abs="$(builtin cd "$_safe_cwd" 2>/dev/null && pwd -P)" || _safe_abs="$_safe_cwd"
+
+  case "$_safe_abs" in
+    "$_original_abs"| "$_original_abs"/*)
+      echo "  ${RED}ERROR:${NC} Project file '$_project_marker' detected in $_original_cwd"
+      echo "  ${RED}ERROR:${NC} MACSMITH_UPDATE_WORKDIR must be outside the project directory"
+      echo "  ${BLUE}INFO:${NC} Current safe directory: $_safe_cwd"
+      echo "  ${BLUE}INFO:${NC} Set MACSMITH_ALLOW_PROJECT_MODIFY=1 to opt in to running from the project."
+      return 1
+      ;;
+  esac
+
+  echo "  ${BLUE}INFO:${NC} Project file '$_project_marker' detected in $_original_cwd"
+  echo "  ${BLUE}INFO:${NC} Running update from $_safe_cwd to avoid modifying project files"
+  echo "  ${BLUE}INFO:${NC} Set MACSMITH_ALLOW_PROJECT_MODIFY=1 to opt in to running from the current directory"
+
+  if ! builtin cd "$_safe_cwd"; then
+    echo "  ${RED}ERROR:${NC} Could not enter safe update directory: $_safe_cwd"
+    return 1
+  fi
+
+  _update_impl "$@"
+  local _update_rc=$?
+
+  if ! builtin cd "$_original_cwd"; then
+    echo "  ${RED}WARNING:${NC} Could not restore original directory: $_original_cwd"
+  fi
+
+  return $_update_rc
+}
+
+update() {
+  _run_update_from_safe_cwd "$@"
+}
+
 # ================================ VERIFY ===================================
 
 verify() {
@@ -4276,6 +4390,8 @@ case "${1:-}" in
     echo "  MACSMITH_SWIFT_SNAPSHOTS=1           Enable Swift development snapshot updates"
     echo "  MACSMITH_UPDATE_CHECK=1              Opt in to shell-startup update check (off by default)"
     echo "  MACSMITH_ALLOW_UNSIGNED_UPGRADE=1    Opt in to upgrade from unsigned GitHub zipball"
+    echo "  MACSMITH_ALLOW_PROJECT_MODIFY=1      Opt in to running update from a project directory"
+    echo "  MACSMITH_UPDATE_WORKDIR=DIR          Safe working directory for update package-manager calls"
     exit 1
     ;;
 esac

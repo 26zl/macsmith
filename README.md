@@ -57,7 +57,7 @@ Pick newer tags from [Releases](https://github.com/26zl/macsmith/releases).
 - macOS-only: scripts abort on non-Darwin systems.
 - Conservative automation: `NONINTERACTIVE=1` accepts each prompt's default; use `MACSMITH_YES=1` only when you explicitly want "yes" to every prompt.
 - Existing shell files are backed up before replacement, and managed writes use temp-file + rename where corruption would hurt.
-- Project files are not edited by `update`; it maintains global tools only.
+- Project files are not edited by `update`; it maintains global tools only and moves package-manager work to a private safe directory when launched inside a project.
 - Nix/APFS removal is guarded: the APFS volume delete always requires typing `yes`, even with `--yes`.
 - `doctor` and `verify` are read-only diagnostics.
 
@@ -168,6 +168,8 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 - `NONINTERACTIVE=1` — run without prompts, accepting each prompt's default (`[Y]` => yes, `[N]` => no)
 - `MACSMITH_YES=1` — explicit unattended mode; answer "yes" to every prompt
 - `MACSMITH_FIX_RUBY_GEMS=1` — auto-fix Ruby gem permissions during `update` (on by default; set `0` to disable)
+- `MACSMITH_UPDATE_WORKDIR=<dir>` — safe working directory for `update` package-manager calls
+- `MACSMITH_ALLOW_PROJECT_MODIFY=1` — explicit opt-in to run `update` from the current project directory
 
 ## Your own customizations
 
