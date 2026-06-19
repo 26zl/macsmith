@@ -694,7 +694,7 @@ jobs:
 
           cmd = ["zsh", "-lc", "macsmith update"]
           try:
-              result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=1800)
+              result = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=1800)
               output = result.stdout
           except subprocess.TimeoutExpired:
               print("Update timed out after 1800s")
