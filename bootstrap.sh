@@ -22,7 +22,35 @@ NC='\033[0m'
 
 REPO_URL="${MACSMITH_REPO:-https://github.com/26zl/macsmith.git}"
 REF="${MACSMITH_REF:-main}"
-CLONE_DIR="${TMPDIR:-/tmp}/macsmith-$$"
+# Reject anything but git-ref-safe characters — this value flows into
+# `git clone --branch`/`git checkout`. Defense-in-depth against a hostile env.
+# The first character must be non-dash so a value like -f / --orphan can't be
+# parsed as a git option by the fallback `git checkout "$REF"` below.
+if [[ ! "$REF" =~ ^[A-Za-z0-9._/][A-Za-z0-9._/-]*$ ]]; then
+  printf 'ERROR: MACSMITH_REF contains invalid characters: %s\n' "$REF" >&2
+  exit 1
+fi
+# Private, unpredictable clone dir (avoids a pre-created /tmp symlink hijacking
+# the predictable macsmith-$$ path on the curl|zsh route).
+CLONE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/macsmith-XXXXXX")"
+
+# Register cleanup immediately after the temp dir exists — BEFORE the banner,
+# the 5s abort countdown, and the early-exit checks below — so Ctrl-C during
+# the advertised abort window (or any early `exit`) never leaks the temp clone.
+_bs_interrupted=0
+cleanup() {
+  rm -rf "$CLONE_DIR" 2>/dev/null || true
+  if [[ "$_bs_interrupted" == "1" ]]; then
+    printf '\n\033[1;33m⚠️  Bootstrap interrupted.\033[0m\n'
+    printf '  Cloned files removed from %s.\n' "$CLONE_DIR"
+    printf '  If install.sh had started, any partial changes were rolled back by its atomic writes.\n'
+    printf '  Re-run when ready:\n'
+    printf '    curl -fsSL https://raw.githubusercontent.com/26zl/macsmith/main/bootstrap.sh | zsh\n'
+  fi
+}
+_on_int() { _bs_interrupted=1; trap - INT; kill -INT $$; }
+trap cleanup EXIT TERM HUP
+trap _on_int INT
 
 # Banner — figlet "macsmith" with a claw hammer drawn next to it.
 # Single-quoted heredoc keeps backticks in the figlet art from triggering
@@ -89,24 +117,6 @@ if ! command -v git >/dev/null 2>&1; then
   printf '  curl -fsSL https://raw.githubusercontent.com/26zl/macsmith/main/bootstrap.sh | zsh\n'
   exit 0
 fi
-
-# Cleanup on exit (including Ctrl-C). Prints a friendly interrupt message
-# so the user knows the tmp clone is gone and nothing persistent was written
-# by bootstrap itself (install.sh handles its own atomic writes).
-_bs_interrupted=0
-cleanup() {
-  rm -rf "$CLONE_DIR" 2>/dev/null || true
-  if [[ "$_bs_interrupted" == "1" ]]; then
-    printf '\n\033[1;33m⚠️  Bootstrap interrupted.\033[0m\n'
-    printf '  Cloned files removed from %s.\n' "$CLONE_DIR"
-    printf '  If install.sh had started, any partial changes were rolled back by its atomic writes.\n'
-    printf '  Re-run when ready:\n'
-    printf '    curl -fsSL https://raw.githubusercontent.com/26zl/macsmith/main/bootstrap.sh | zsh\n'
-  fi
-}
-_on_int() { _bs_interrupted=1; trap - INT; kill -INT $$; }
-trap cleanup EXIT TERM HUP
-trap _on_int INT
 
 # Clone repository at the requested ref
 printf 'Downloading setup files (ref=%s)...\n' "$REF"
@@ -187,4 +197,6 @@ else
 fi
 
 printf '\n%b✅ Setup complete!%b\n\n' "$GREEN" "$NC"
-printf 'Run: source ~/.zshrc\n\n'
+printf 'Open a new terminal (or run: exec zsh -l) to load your new environment.\n'
+printf '(PATH changes live in ~/.zprofile, which only a login shell re-reads —\n'
+printf ' "source ~/.zshrc" alone will not pick them up.)\n\n'

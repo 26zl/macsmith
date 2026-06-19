@@ -109,13 +109,20 @@ jobs:
               const workflowStatuses = {};
               
               // Check status of all required workflows
+              // Keep the NEWEST run per workflow name (largest id == most
+              // recent). listWorkflowRunsForRepo returns newest-first, so a
+              // plain last-write keeps the OLDEST run — a stale green could
+              // then mask a fresh red for the same commit and ship a bad build.
               for (const run of runs.workflow_runs) {
                 if (requiredWorkflows.includes(run.name)) {
-                  workflowStatuses[run.name] = {
-                    status: run.status,
-                    conclusion: run.conclusion,
-                    id: run.id
-                  };
+                  const existing = workflowStatuses[run.name];
+                  if (!existing || run.id > existing.id) {
+                    workflowStatuses[run.name] = {
+                      status: run.status,
+                      conclusion: run.conclusion,
+                      id: run.id
+                    };
+                  }
                 }
               }
               
@@ -191,9 +198,15 @@ jobs:
 
       - name: Get version
         id: version
+        env:
+          # Pass the untrusted workflow_dispatch input via env so it reaches the
+          # shell as DATA, never interpolated into the script text — closes the
+          # `${{ github.event.inputs.version }}` command-injection sink on the
+          # contents:write release runner.
+          VERSION_INPUT: ${{ github.event.inputs.version }}
         run: |
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
+            VERSION="$VERSION_INPUT"
           elif [ "${{ github.event_name }}" == "release" ]; then
             VERSION="${GITHUB_REF#refs/tags/}"
           elif [ "${{ github.event_name }}" == "workflow_run" ]; then
@@ -204,7 +217,15 @@ jobs:
             VERSION="v${DATE}-${SHORT_SHA}"
             echo "Auto-generated version: $VERSION"
           fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # Allow only tag-shaped values: v + alnum/._- with no spaces,
+          # newlines, shell metacharacters, or path separators. A shell `case`
+          # pattern like v[0-9A-Za-z._-]* is NOT enough: the trailing `*` means
+          # "any suffix", so `v1;bad` passes. Bash regex anchors close that.
+          if [[ ! "$VERSION" =~ ^v[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+            echo "ERROR: invalid version: $VERSION" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
           echo "Release version: $VERSION"
 
       - name: Create release package
@@ -237,14 +258,14 @@ jobs:
           sha256sum "${PACKAGE_NAME}.zip" > "${PACKAGE_NAME}.zip.sha256"
           
           # Set outputs
-          echo "zip_file=${PACKAGE_NAME}.zip" >> $GITHUB_OUTPUT
-          echo "checksum_file=${PACKAGE_NAME}.zip.sha256" >> $GITHUB_OUTPUT
+          echo "zip_file=${PACKAGE_NAME}.zip" >> "$GITHUB_OUTPUT"
+          echo "checksum_file=${PACKAGE_NAME}.zip.sha256" >> "$GITHUB_OUTPUT"
           
           # Read checksum content for release notes
           CHECKSUM_CONTENT=$(cat "${PACKAGE_NAME}.zip.sha256")
-          echo "checksum_content<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHECKSUM_CONTENT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "checksum_content<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$CHECKSUM_CONTENT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Create Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2

@@ -88,6 +88,11 @@ jobs:
           echo "XDG_CONFIG_HOME=$fresh_home/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$fresh_home/.cache" >> "$GITHUB_ENV"
           echo "NONINTERACTIVE=1" >> "$GITHUB_ENV"
+          # MACSMITH_YES=1 = full unattended install (yes to every prompt). The
+          # functional test deliberately exercises ALL installers; bare CI /
+          # NONINTERACTIVE now only answers each prompt's own default, so this
+          # explicit opt-in preserves full coverage.
+          echo "MACSMITH_YES=1" >> "$GITHUB_ENV"
           mkdir -p "$fresh_home/.local/share" "$fresh_home/.config" "$fresh_home/.cache"
           echo "Fresh home directory prepared: $fresh_home"
 
@@ -310,9 +315,12 @@ jobs:
             exit 1
           fi
           
-          # Test that dev-tools.sh does NOT install system package managers
+          # Test that dev-tools.sh does NOT install system package managers.
+          # This is a hard invariant (system PMs belong to install.sh only), so
+          # fail the build rather than warn — a regression here must block release.
           if grep -q "install_homebrew\|install_macports\|install_nix\|install_mas" dev-tools.sh; then
-            echo "WARNING: System package manager install functions found in dev-tools.sh (should be in install.sh only)"
+            echo "::error::System package manager install functions found in dev-tools.sh (should be in install.sh only)"
+            exit 1
           else
             echo "OK: dev-tools.sh does not install system package managers (Homebrew, MacPorts, Nix, mas)"
           fi

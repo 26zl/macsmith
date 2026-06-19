@@ -233,9 +233,14 @@ if [[ -f "$ZPROFILE" ]]; then
         log_dry "awk strip between '$_start' and '$_end' in $ZPROFILE"
       else
         local_tmp="$(mktemp)"
-        awk -v start_re="$_start" -v end_re="$_end" '
-          $0 ~ start_re { in_block=1; next }
-          in_block && $0 ~ end_re { in_block=0; next }
+        # Match the header/footer as literal substrings via index(): passing the
+        # grep ERE ($_start with \( \. \)) into awk -v compiles it as a dynamic
+        # regex where the backslash-escapes are dropped and (FOR .ZPROFILE)
+        # becomes a capture group, so the real paren-bearing header never matches
+        # and the block is silently left in place. index() is awk-dialect-proof.
+        awk '
+          index($0, "FINAL PATH CLEANUP (FOR .ZPROFILE)") { in_block=1; next }
+          in_block && index($0, "End macsmith managed block") { in_block=0; next }
           !in_block { print }
         ' "$ZPROFILE" > "$local_tmp"
         mv "$local_tmp" "$ZPROFILE"
@@ -258,8 +263,8 @@ if [[ -f "$ZPROFILE" ]]; then
           log_dry "awk strip from '$_start' to EOF in $ZPROFILE"
         else
           local_tmp="$(mktemp)"
-          awk -v start_re="$_start" '
-            $0 ~ start_re { exit }
+          awk '
+            index($0, "FINAL PATH CLEANUP (FOR .ZPROFILE)") { exit }
             { print }
           ' "$ZPROFILE" > "$local_tmp"
           mv "$local_tmp" "$ZPROFILE"

@@ -9,7 +9,7 @@
 _detect_brew_prefix() {
   if [[ -d /opt/homebrew ]]; then
     echo /opt/homebrew
-  elif [[ -d /usr/local/Homebrew ]]; then
+  elif [[ -d /usr/local/Homebrew ]] || [[ -x /usr/local/bin/brew ]]; then
     echo /usr/local
   else
     echo ""
@@ -312,7 +312,7 @@ elif command -v colorls >/dev/null 2>&1; then
 else
   alias ls='ls -G'
 fi
-alias myip="curl -s ifconfig.me"
+alias myip="curl --proto '=https' --tlsv1.2 -fsSL https://ifconfig.me"
 alias flushdns="sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder"
 alias reloadzsh="source ${ZDOTDIR:-$HOME}/.zshrc"
 alias reload="source ${ZDOTDIR:-$HOME}/.zprofile && source ${ZDOTDIR:-$HOME}/.zshrc"
@@ -524,7 +524,7 @@ if [[ "${MACSMITH_UPDATE_CHECK:-0}" == "1" ]]; then
       (
         # Always update timestamp to avoid retrying on every shell start
         date +%s > "$_macsmith_data/last-update-check"
-        _latest="$(curl -s --max-time 5 https://api.github.com/repos/26zl/macsmith/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
+        _latest="$(curl --proto '=https' --tlsv1.2 -fsSL --max-time 5 https://api.github.com/repos/26zl/macsmith/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
         if [[ -n "$_latest" ]]; then
           echo "$_latest" > "$_macsmith_data/latest-remote-version"
         fi

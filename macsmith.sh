@@ -8,12 +8,16 @@
 # this file while it's running.
 {
 
-# Colors for output
-readonly GREEN='\033[0;32m'
-readonly BLUE='\033[0;34m'
-readonly RED='\033[0;31m'
-readonly YELLOW='\033[1;33m'
-readonly NC='\033[0m' # No Color
+# Colors for output (honor the NO_COLOR convention — https://no-color.org)
+if [[ -n "${NO_COLOR:-}" ]]; then
+  readonly GREEN='' BLUE='' RED='' YELLOW='' NC=''
+else
+  readonly GREEN='\033[0;32m'
+  readonly BLUE='\033[0;34m'
+  readonly RED='\033[0;31m'
+  readonly YELLOW='\033[1;33m'
+  readonly NC='\033[0m' # No Color
+fi
 
 # ================================ SYSTEM COMPATIBILITY ====================
 
@@ -44,7 +48,7 @@ _check_macos_compatibility() {
   
   # Check available disk space
   if command -v df >/dev/null 2>&1; then
-    local available_space=$(df -g . 2>/dev/null | awk 'NR==2 {print $4}' || echo "")
+    local available_space=$(df -Pg . 2>/dev/null | awk 'NR==2 {print $4}' || echo "")
     if [[ -n "$available_space" ]] && [[ "$available_space" =~ ^[0-9]+$ ]] && [[ "$available_space" -lt 1 ]]; then
       echo "  ${RED}WARNING:${NC} Low disk space detected ($available_space GB available)"
     fi
@@ -55,7 +59,7 @@ _check_macos_compatibility() {
 _detect_brew_prefix() {
   if [[ -d /opt/homebrew ]]; then
     echo /opt/homebrew
-  elif [[ -d /usr/local/Homebrew ]]; then
+  elif [[ -d /usr/local/Homebrew ]] || [[ -x /usr/local/bin/brew ]]; then
     echo /usr/local
   else
     echo ""
@@ -288,13 +292,16 @@ _fix_all_ruby_gems() {
       
       echo "  FIXING: $gem..."
       
-      # Uninstall and reinstall (non-interactive)
-      gem uninstall "$gem" --ignore-dependencies --force --no-user-install 2>/dev/null || true
-      if gem install "$gem" --no-user-install --no-document 2>/dev/null; then
+      # Reinstall in place with --force (overwrites/repairs even when present)
+      # so the gem is never absent mid-operation. Uninstalling first and then
+      # failing the reinstall (network/build error) would permanently delete a
+      # working gem — and this runs by default on every `update`.
+      if gem install "$gem" --force --no-user-install --no-document 2>/dev/null; then
         ((fixed_count++))
         echo "    SUCCESS: Fixed $gem"
+        gem cleanup "$gem" 2>/dev/null || true
       else
-        echo "    ${RED}WARNING:${NC} Failed to fix $gem"
+        echo "    ${RED}WARNING:${NC} Failed to fix $gem (left untouched)"
       fi
     fi
   done
@@ -342,9 +349,12 @@ _check_python_package_compatibility() {
   fi
   
   if [[ -n "$requirements" ]]; then
-    # Simple check for Python version requirements (can be extended for more complex parsing)
-    if [[ "$requirements" == *"<"* ]] || [[ "$requirements" == *">"* ]] || [[ "$requirements" == *"!="* ]]; then
-      echo "  ${RED}WARNING:${NC} $package_name has Python version requirements: $requirements"
+    # Only an actual UPPER bound (<X.Y) or exclusion (!=X.Y) can make a NEWER
+    # Python incompatible. A pure lower bound like ">=3.8" is satisfied by any
+    # newer Python, so do NOT treat a lone ">" as incompatible — that flagged
+    # nearly every package and silently blocked the pyenv auto-upgrade.
+    if [[ "$requirements" == *"<"* ]] || [[ "$requirements" == *"!="* ]]; then
+      echo "  ${RED}WARNING:${NC} $package_name has an upper-bound Python requirement: $requirements"
       return 1
     fi
   fi
@@ -663,7 +673,9 @@ _chruby_latest_available() {
   # Fetch latest available (slow operation)
   local latest=""
   if command -v ruby-install >/dev/null 2>&1; then
-    latest="$(ruby-install --list ruby 2>/dev/null | awk '/^ruby [0-9]+\.[0-9]+\.[0-9]+$/ {print $2}' | sort -V | tail -n1)"
+    # ruby-install --list prints 4-space-indented bare versions (e.g. "    3.4.2")
+    # under a "  ruby:" header — NOT "ruby X.Y.Z". Match indented bare versions.
+    latest="$(ruby-install --list ruby 2>/dev/null | awk '/^[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+$/ {print $1}' | sort -V | tail -n1)"
   fi
   
   # Cache the result
@@ -688,8 +700,13 @@ _chruby_install_latest() {
   if ! chruby 2>/dev/null | sed -E 's/^[* ]+//' | grep -qx "ruby-$latest"; then
     ruby-install ruby "$latest" || return 1
   fi
-  # Activate the installed version
+  # Activate and verify it actually took effect. chruby builds its RUBIES list
+  # once at source time, so a ruby just created by ruby-install may not be in
+  # the in-process list yet; swallowing the error would report a false success.
   chruby "ruby-$latest" 2>/dev/null || true
+  if [[ "${RUBY_ROOT##*/}" != "ruby-$latest" ]]; then
+    return 1
+  fi
   echo "ruby-$latest"
 }
 
@@ -944,27 +961,36 @@ _cargo_update_packages() {
   
   local total=$(echo "$installed_packages" | wc -l)
   local updated=0
+  local skipped=0
   local failed=0
-  
+
   echo "  Found $total globally installed packages"
-  
-  # Update each package
+
+  # Update each package. `cargo install <pkg>` exits 0 AND prints "Ignored ...
+  # already installed" (to STDERR) for an up-to-date package, so trusting the
+  # exit code alone reports every package as "Updated". Capture output (2>&1)
+  # and classify: already-installed = skipped, real install/replace = updated.
+  local _cargo_out
   while IFS= read -r package; do
     [[ -z "$package" ]] && continue
     echo "  Upgrading $package..."
-    if cargo install "$package" 2>/dev/null >/dev/null; then
-      ((updated++))
+    if _cargo_out="$(cargo install "$package" 2>&1)"; then
+      if echo "$_cargo_out" | grep -qiE 'already installed|^[[:space:]]*Ignored '; then
+        ((skipped++))
+      else
+        ((updated++))
+      fi
     else
       ((failed++))
       echo "    ${RED}WARNING:${NC} Failed to upgrade $package"
     fi
   done <<< "$installed_packages"
-  
+
   if [[ $failed -eq 0 ]]; then
-    echo "  SUCCESS: Updated $updated packages"
+    echo "  SUCCESS: $updated updated, $skipped already current"
     return 0
   else
-    echo "  PARTIAL: Updated $updated packages, $failed failed"
+    echo "  PARTIAL: $updated updated, $skipped already current, $failed failed"
     return 1
   fi
 }
@@ -997,10 +1023,14 @@ update() {
       return $?
       ;;
     node|nvm|npm)
-      if ! command -v nvm >/dev/null 2>&1 && [[ ! -s "$HOME/.nvm/nvm.sh" ]]; then
+      # Use NVM_DIR (custom/Homebrew installs) and `type` (nvm is a function),
+      # matching the full-update path; the old command-v + hardcoded ~/.nvm
+      # falsely reported "nvm not installed" for a custom $NVM_DIR.
+      local _nvm_sh="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+      if ! type nvm >/dev/null 2>&1 && [[ ! -s "$_nvm_sh" ]]; then
         echo "${RED}[Node]${NC} nvm not installed"; return 1
       fi
-      [[ -s "$HOME/.nvm/nvm.sh" ]] && source "$HOME/.nvm/nvm.sh"
+      [[ -s "$_nvm_sh" ]] && source "$_nvm_sh" 2>/dev/null || true
       echo "${GREEN}[Node]${NC} install + use latest LTS, bump npm"
       # `nvm install --lts` already activates the version; calling `nvm use
       # --lts` afterwards would re-print "Now using node vX.Y.Z".
@@ -1019,7 +1049,14 @@ update() {
       fi
       if command -v conda >/dev/null 2>&1; then
         echo "${GREEN}[conda]${NC} update"
-        conda update -n base -c defaults conda -y || _py_rc=$?
+        # Only force -c defaults on Anaconda; Miniforge (the conda we install by
+        # default) has no 'defaults' channel/ToS and would error. Mirror the
+        # detection the full-update path already uses.
+        if conda info | grep -qi "channel.*defaults"; then
+          conda update -n base -c defaults conda -y || _py_rc=$?
+        else
+          conda update -n base conda -y || _py_rc=$?
+        fi
       fi
       return $_py_rc
       ;;
@@ -1050,6 +1087,12 @@ update() {
     go|golang)
       if ! command -v brew >/dev/null 2>&1; then
         echo "${RED}[Go]${NC} brew needed (Go is a brew formula)"; return 1
+      fi
+      if ! brew list go >/dev/null 2>&1; then
+        # Go installed from go.dev (not Homebrew) — `brew upgrade go` would error.
+        echo "${BLUE}[Go]${NC} Go is present but not a Homebrew formula."
+        echo "${BLUE}[Go]${NC} Update it where it was installed (https://go.dev/dl/), or 'brew install go'."
+        return 0
       fi
       echo "${GREEN}[Go]${NC} brew upgrade go"
       brew upgrade go
@@ -1094,7 +1137,8 @@ Targets:
   node | nvm | npm    Install/use latest LTS, bump npm
   python | pyenv |    pyenv rehash, pipx upgrade-all, conda update
     pipx | conda
-  ruby | gem          gem update (180s timeout) + gem cleanup
+  ruby | chruby |     gem update (180s timeout) + gem cleanup
+    rubygems | gem
   rust | rustup       rustup update
   swift | swiftly     swiftly self-update + install latest
   go | golang         brew upgrade go
@@ -1112,7 +1156,8 @@ EOF
       ;;
   esac
 
-  # Full "all" path below — unchanged from prior behaviour.
+  # Full "all" path below.
+  local _update_failed=0
   _ensure_system_path
   echo "${GREEN}==> Update started $(date)${NC}"
   if [[ -f "$DATA_DIR/version" ]]; then
@@ -1297,6 +1342,7 @@ EOF
     if [[ ${#brew_errors[@]} -gt 0 ]]; then
       echo "  Homebrew issues: ${brew_errors[*]}"
       echo "  Consider running: brew doctor for detailed diagnostics"
+      _update_failed=1
     fi
   fi
 
@@ -1404,22 +1450,12 @@ EOF
         fi
       fi
       
-      # Now check if there's a newer version available (may be slow, but cached)
-      # Only check cache first to avoid unnecessary network calls
-      local cache_file="$PYENV_ROOT/.latest_available_cache"
-      if [[ -f "$cache_file" ]]; then
-        local cached_latest=$(cat "$cache_file" 2>/dev/null)
-        # If cache shows a newer version than installed, fetch fresh to confirm
-        if [[ -n "$cached_latest" && "$cached_latest" != "$latest_installed" ]]; then
-          latest_available="$(_pyenv_latest_available)"
-        else
-          # Cache suggests we're up to date, use installed version
-          latest_available="$latest_installed"
-        fi
-      else
-        # No cache yet - check available versions (will create cache)
-        latest_available="$(_pyenv_latest_available)"
-      fi
+      # Always ask _pyenv_latest_available — it has its own 24h mtime cache, so
+      # this is cheap when fresh and re-queries only when stale. The old
+      # short-circuit (cached == installed -> reuse installed) meant an
+      # already-up-to-date user never refreshed the cache and therefore never
+      # discovered a genuinely new upstream Python release.
+      latest_available="$(_pyenv_latest_available)"
     else
       # No installed versions - check what's available (may be slow, but cached)
       latest_available="$(_pyenv_latest_available)"
@@ -2185,7 +2221,7 @@ except Exception:
 
   # Go
   if command -v go >/dev/null 2>&1; then
-    _go_update_toolchain || true
+    _go_update_toolchain || _update_failed=1
   else
     echo "${GREEN}[Go]${NC} Not found - skipping"
     echo "  ${BLUE}INFO:${NC} To install Go, run: 'dev-tools'"
@@ -2422,6 +2458,7 @@ except Exception:
     # Report Rust issues
     if [[ ${#rust_errors[@]} -gt 0 ]]; then
       echo "  Rust issues: ${rust_errors[*]}"
+      _update_failed=1
     fi
   else
     echo "${GREEN}[Rust]${NC} Not found - skipping"
@@ -2430,7 +2467,7 @@ except Exception:
 
   # Cargo (Rust package manager) - update globally installed packages
   if command -v cargo >/dev/null 2>&1; then
-    _cargo_update_packages || true
+    _cargo_update_packages || _update_failed=1
   fi
 
   # .NET SDK - update if installed
@@ -2497,8 +2534,10 @@ except Exception:
     tool_list_output="$(dotnet tool list --global 2>&1)" || tool_list_exit_code=$?
     local tool_count=0
     if [[ $tool_list_exit_code -eq 0 ]]; then
-      # Count lines that contain package info (skip header lines)
-      tool_count=$(echo "$tool_list_output" | grep -E "^[a-zA-Z]" | wc -l | tr -d ' ' || echo "0")
+      # Count only rows whose 2nd field is a version (starts with a digit). The
+      # old ^[a-zA-Z] also matched the "Package Id  Version  Commands" header,
+      # so a zero-tool environment reported 1 and ran a pointless update.
+      tool_count=$(echo "$tool_list_output" | grep -E "^[a-zA-Z0-9._-]+[[:space:]]+[0-9]" | wc -l | tr -d ' ' || echo "0")
     fi
 
     if [[ "$tool_count" -eq 0 ]]; then
@@ -2757,12 +2796,16 @@ except Exception:
     
     if [[ ${#nix_errors[@]} -gt 0 ]]; then
       echo "  Nix issues: ${nix_errors[*]}"
+      _update_failed=1
     fi
   fi
 
   hash -r 2>/dev/null || true
   _ensure_system_path
   echo "${GREEN}==> Update finished $(date)${NC}"
+  # Propagate subsystem failures so cron/CI wrappers that gate on the exit code
+  # of `macsmith update` don't treat a broken update as success.
+  return "$_update_failed"
 }
 
 # ================================ VERIFY ===================================
@@ -3676,6 +3719,19 @@ _self_upgrade() {
     return 0
   fi
 
+  # Downgrade protection: only proceed if the remote tag is strictly newer.
+  # Tags are vYYYY.MM.DD-<sha> or vX.Y.Z; `sort -V` orders both sanely. If the
+  # newest of the two is the local one, we're already ahead — never clobber
+  # current code with an older/yanked release.
+  local _newest=""
+  _newest="$(printf '%s\n%s\n' "$local_version" "$remote_version" | sort -V | tail -n1)"
+  if [[ "$_newest" != "$remote_version" ]]; then
+    echo ""
+    echo "${GREEN}✅ Local version ($local_version) is newer than latest release ($remote_version) — nothing to do${NC}"
+    rm -f "$DATA_DIR/latest-remote-version"
+    return 0
+  fi
+
   echo ""
   echo "Upgrading ${BLUE}$local_version${NC} -> ${BLUE}$remote_version${NC}"
 
@@ -3688,7 +3744,12 @@ _self_upgrade() {
 
   local tmp_dir=""
   tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "$tmp_dir"; rm -f "$LOCK_FILE"' EXIT INT TERM HUP
+  # Register the temp dir with the script-level cleanup instead of a
+  # function-local trap. A `trap ... EXIT INT TERM HUP` here fired on FUNCTION
+  # return (zsh), prematurely releasing the lock, and its cleanup-only INT
+  # handler shadowed _on_interrupt — so Ctrl-C during the upgrade did NOT abort
+  # the run. _cleanup_lock / _on_interrupt now own all cleanup.
+  _UPGRADE_TMP_DIR="$tmp_dir"
 
   # Download + verify against published SHA-256 when possible
   if [[ -n "$asset_url" ]] && [[ -n "$sha_url" ]]; then
@@ -3749,11 +3810,15 @@ _self_upgrade() {
     return 1
   fi
 
-  # Find the extracted directory (GitHub zips contain a single top-level dir)
-  local extract_dir=""
-  extract_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -1)"
-  if [[ -z "$extract_dir" ]] || [[ ! -d "$extract_dir" ]]; then
-    echo "${RED}❌ Unexpected archive structure${NC}"
+  # Locate the payload root. Our signed release asset (release.yml builds it via
+  # `cd $PKG && zip ... .`) has the files at the zip ROOT, while GitHub's
+  # auto-generated zipball wraps everything in one top-level dir. Don't assume
+  # either layout — find macsmith.sh and treat its directory as the root.
+  local extract_dir="" _ms_path=""
+  _ms_path="$(find "$tmp_dir" -maxdepth 2 -name 'macsmith.sh' -type f | head -1)"
+  [[ -n "$_ms_path" ]] && extract_dir="$(dirname "$_ms_path")"
+  if [[ -z "$extract_dir" ]] || [[ ! -f "$extract_dir/macsmith.sh" ]]; then
+    echo "${RED}❌ Unexpected archive structure (macsmith.sh not found)${NC}"
     rm -rf "$tmp_dir"
     return 1
   fi
@@ -4106,8 +4171,12 @@ EOF
 }
 
 # ================================ MAIN =====================================
-# Concurrent-run protection
-LOCK_FILE="/tmp/macsmith-maintain.lock"
+# Concurrent-run protection.
+# Keep the lock in our private data dir, not world-writable /tmp, so a local
+# attacker can't pre-plant a symlink at a predictable /tmp path and redirect
+# the `echo $$ >` write to clobber an arbitrary user-writable file.
+mkdir -p "$DATA_DIR" 2>/dev/null || true
+LOCK_FILE="$DATA_DIR/maintain.lock"
 if [[ -f "$LOCK_FILE" ]]; then
   lock_pid=""
   lock_pid="$(<"$LOCK_FILE")"
@@ -4119,8 +4188,15 @@ if [[ -f "$LOCK_FILE" ]]; then
   rm -f "$LOCK_FILE"
 fi
 echo $$ > "$LOCK_FILE"
+# Tracks the self-upgrade temp dir so the script-level cleanup removes it.
+# _self_upgrade no longer installs its own EXIT/INT trap (which fired on
+# function return and shadowed the Ctrl-C-aborts-the-run handler below).
+_UPGRADE_TMP_DIR=""
 # shellcheck disable=SC2329  # invoked via trap below (shellcheck can't track it in this large zsh file)
-_cleanup_lock() { rm -f "$LOCK_FILE"; }
+_cleanup_lock() {
+  rm -f "$LOCK_FILE"
+  [[ -n "$_UPGRADE_TMP_DIR" ]] && rm -rf "$_UPGRADE_TMP_DIR"
+}
 # Ctrl-C must abort the WHOLE run, not just the current sub-step. A plain
 # `trap 'rm -f lock' INT` (the old form) cleaned the lock but did not exit, so
 # in zsh the script continued to the next update section after each ^C —

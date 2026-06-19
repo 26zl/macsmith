@@ -349,9 +349,11 @@ FSTAB_CHANGED=0
 log_section "4. Cleaning /etc/synthetic.conf"
 SYNTHETIC=/etc/synthetic.conf
 if [[ -f "$SYNTHETIC" ]]; then
-  # Match ONLY the exact canonical line "nix" (optionally followed by
-  # trailing whitespace). Never touches other firmlink entries.
-  if grep -qE '^nix[[:space:]]*$' "$SYNTHETIC"; then
+  # Match the "nix" firmlink entry in either form: the bare single-field "nix"
+  # line, or the two-field "nix<TAB>/target/path" form some installers write.
+  # The required whitespace after "nix" enforces a field boundary, so
+  # "nixpkgs" / "nix2" are never touched. Uses -E (ERE) like the fstab block.
+  if grep -qE '^nix([[:space:]].*)?$' "$SYNTHETIC"; then
     SYNTHETIC_BACKUP="${SYNTHETIC}.backup-before-nix-uninstall-${TS}"
     run cp -p "$SYNTHETIC" "$SYNTHETIC_BACKUP"
     # Flag only when the backup truly exists (run is a no-op under --dry-run).
@@ -359,9 +361,9 @@ if [[ -f "$SYNTHETIC" ]]; then
       SYNTHETIC_BACKUP_CREATED=1
     fi
     if [[ $DRY_RUN -eq 1 ]]; then
-      log_dry "sed -i '' '/^nix[[:space:]]*\$/d' $SYNTHETIC"
+      log_dry "sed -i '' -E '/^nix([[:space:]].*)?\$/d' $SYNTHETIC"
     else
-      sed -i '' '/^nix[[:space:]]*$/d' "$SYNTHETIC"
+      sed -i '' -E '/^nix([[:space:]].*)?$/d' "$SYNTHETIC"
       log_ok "stripped 'nix' entry from $SYNTHETIC"
       SYNTHETIC_CHANGED=1
     fi
@@ -426,46 +428,80 @@ if diskutil info /nix >/dev/null 2>&1; then
                   | awk '{ print $1 }')"
 fi
 
+# `diskutil info /nix` reports whatever volume CONTAINS /nix. When the Nix Store
+# volume is unmounted but the /nix firmlink still exists (a common partial or
+# broken-install state), that is the ROOT/Data volume — deleting it would wipe
+# the whole system. Trust path (a) only when the volume is literally named
+# "Nix Store"; otherwise drop it and fall through to the name-anchored detectors.
+if [[ -n "$NIX_VOLUME_ID" ]]; then
+  _vname="$(diskutil info "$NIX_VOLUME_ID" 2>/dev/null \
+            | awk -F': *' '/Volume Name/ { print $2; exit }')"
+  if [[ "$_vname" != "Nix Store" ]]; then
+    log_info "/nix resolves to volume '${_vname:-unknown}' (not 'Nix Store'); ignoring path match."
+    NIX_VOLUME_ID=""
+  fi
+  unset _vname
+fi
+
 if [[ -z "$NIX_VOLUME_ID" ]]; then
   # `diskutil apfs list` groups volumes with identifiers like "disk3s7".
   # We track the most recent identifier line and emit it when we hit a
-  # "Name: Nix Store" row inside the same block.
+  # "Name: Nix Store" row inside the same block. Anchor the name at end so
+  # "Nix Store 2" / "Nix Store Backup" never match.
   NIX_VOLUME_ID="$(diskutil apfs list 2>/dev/null | awk '
     /APFS Volume Disk/ {
       for (i = 1; i <= NF; i++) {
         if ($i ~ /^disk[0-9]+s[0-9]+$/) { id = $i }
       }
     }
-    /Name:[[:space:]]+Nix Store/ { print id; exit }
+    /Name:[[:space:]]+Nix Store$/ { print id; exit }
   ' || true)"
 fi
 
 if [[ -z "$NIX_VOLUME_ID" ]]; then
-  # Last resort — any volume literally named "Nix Store" in `diskutil list`
-  NIX_VOLUME_ID="$(diskutil list 2>/dev/null \
-                   | awk '/Nix Store/ { print $NF; exit }' || true)"
+  # Last resort — find a candidate in `diskutil list`, then CONFIRM its exact
+  # volume name is "Nix Store" (grep -qx, whole-line match) so a decoy volume
+  # named e.g. "My Nix Store Backup" can never be selected for deletion.
+  _cand="$(diskutil list 2>/dev/null | awk '/Nix Store/ { print $NF; exit }' || true)"
+  if [[ -n "$_cand" ]] && diskutil info "$_cand" 2>/dev/null \
+       | awk -F': *' '/Volume Name/ { print $2; exit }' | grep -qx 'Nix Store'; then
+    NIX_VOLUME_ID="$_cand"
+  fi
+  unset _cand
 fi
 
 if [[ -z "$NIX_VOLUME_ID" ]]; then
   log_info "No Nix APFS volume found."
   if [[ -e /nix || -L /nix ]]; then
-    log_warn "Found orphan /nix path but no Nix APFS volume."
-    log_warn "This is usually a leftover mountpoint from a partial/old install."
-    if confirm "Remove orphan /nix directory/symlink?"; then
-      safe_rm /nix
-      if [[ ! -e /nix && ! -L /nix ]]; then
-        ORPHAN_NIX_REMOVED=1
-      fi
+    if mount | grep -q ' on /nix '; then
+      # A live mount we could not match to a Nix Store volume — never rm -rf it
+      # (that would recursively delete the mounted store contents).
+      log_err "/nix is currently mounted but no Nix APFS volume was detected."
+      log_err "Refusing to rm -rf a live mount. Unmount and delete it manually:"
+      log_err "  diskutil unmount force /nix"
     else
-      log_info "Keeping /nix. install.sh/doctor may report a partial Nix install."
+      log_warn "Found orphan /nix path but no Nix APFS volume."
+      log_warn "This is usually a leftover mountpoint from a partial/old install."
+      # strict_confirm so --yes can never auto-delete a system path.
+      if strict_confirm "Remove orphan /nix directory/symlink?"; then
+        safe_rm /nix
+        if [[ ! -e /nix && ! -L /nix ]]; then
+          ORPHAN_NIX_REMOVED=1
+        fi
+      else
+        log_info "Keeping /nix. install.sh/doctor may report a partial Nix install."
+      fi
     fi
   fi
 else
-  log_warn "Found Nix APFS volume: ${NIX_VOLUME_ID}"
+  _final_vname="$(diskutil info "$NIX_VOLUME_ID" 2>/dev/null \
+                  | awk -F': *' '/Volume Name/ { print $2; exit }')"
+  log_warn "Found Nix APFS volume: ${NIX_VOLUME_ID} (name: '${_final_vname:-unknown}')"
   log_warn "Deleting this volume is irreversible and frees the disk space."
   # Uses strict_confirm so --yes cannot auto-delete the volume; README promises
   # "never deletes the APFS volume without confirmation" and we enforce that.
-  if strict_confirm "Delete APFS volume '${NIX_VOLUME_ID}'?"; then
+  # The volume name is surfaced so a wrong target can be caught before typing yes.
+  if strict_confirm "Delete APFS volume '${NIX_VOLUME_ID}' (name: '${_final_vname:-unknown}')?"; then
     if [[ $DRY_RUN -eq 1 ]]; then
       log_dry "diskutil apfs deleteVolume $(printf '%q' "$NIX_VOLUME_ID")"
     else

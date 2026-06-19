@@ -27,14 +27,21 @@ One command installs Homebrew, Starship, language toolchains, and optional sysad
 
 ## Install
 
-Pin to a release (recommended):
+Recommended — pin to the latest release (`v2026.05.28-4f9bb1f`, published 2026-05-28):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/26zl/macsmith/<TAG>/bootstrap.sh \
-  | MACSMITH_REF=<TAG> zsh
+MACSMITH_REF=v2026.05.28-4f9bb1f
+curl -fsSL "https://raw.githubusercontent.com/26zl/macsmith/${MACSMITH_REF}/bootstrap.sh" \
+  | MACSMITH_REF="$MACSMITH_REF" zsh
 ```
 
-Or clone and review:
+**Just want to try it?** One line, no tag to pick (tracks the latest `main`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/26zl/macsmith/main/bootstrap.sh | zsh
+```
+
+Prefer to read before you run? Clone and review (every optional step is a y/n prompt):
 
 ```bash
 git clone https://github.com/26zl/macsmith.git
@@ -43,7 +50,16 @@ cd macsmith
 ./dev-tools.sh    # optional language toolchains
 ```
 
-Pick a tag from [Releases](https://github.com/26zl/macsmith/releases).
+Pick newer tags from [Releases](https://github.com/26zl/macsmith/releases).
+
+## Safety model
+
+- macOS-only: scripts abort on non-Darwin systems.
+- Conservative automation: `NONINTERACTIVE=1` accepts each prompt's default; use `MACSMITH_YES=1` only when you explicitly want "yes" to every prompt.
+- Existing shell files are backed up before replacement, and managed writes use temp-file + rename where corruption would hurt.
+- Project files are not edited by `update`; it maintains global tools only.
+- Nix/APFS removal is guarded: the APFS volume delete always requires typing `yes`, even with `--yes`.
+- `doctor` and `verify` are read-only diagnostics.
 
 ## Daily use
 
@@ -88,6 +104,9 @@ Everything optional is behind a y/n prompt with a sensible default (press Enter 
 
 Concrete footprint before you commit to `curl | zsh`. Everything destructive to existing files creates a timestamped backup first.
 
+<details>
+<summary><strong>Expand the full footprint</strong> — every file and system change, what's automatic vs. prompted, and how to reverse it.</summary>
+
 **Always written** (critical install, no prompt):
 
 - `~/.zshrc` — **overwritten** with macsmith's shell config. Previous file saved to `~/.zshrc.backup.YYYYMMDD_HHMMSS`. User-defined `alias`/`export` lines are harvested into `~/.zshrc.local` (secret-shaped exports — `*_TOKEN`, `*_SECRET`, `*_KEY` — are deliberately skipped).
@@ -131,6 +150,8 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 - `uninstall-nix` — full Nix removal including the APFS volume (the volume-delete step always requires typing `yes` — `--yes` on everything else, never there).
 - Language toolchains: removed by their own tools (`rm -rf ~/.pyenv`, `brew uninstall go`, `rustup self uninstall`, …).
 
+</details>
+
 ## Why not just …
 
 | Tool | macsmith adds |
@@ -144,7 +165,8 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 
 - `MACSMITH_REF=<tag>` — pin the bootstrap to a specific release (reproducible installs)
 - `MACSMITH_UPDATE_CHECK=1` — opt in to a daily update check on shell start (off by default)
-- `NONINTERACTIVE=1` — auto-answer "yes" to every prompt (for CI / unattended re-runs)
+- `NONINTERACTIVE=1` — run without prompts, accepting each prompt's default (`[Y]` => yes, `[N]` => no)
+- `MACSMITH_YES=1` — explicit unattended mode; answer "yes" to every prompt
 - `MACSMITH_FIX_RUBY_GEMS=1` — auto-fix Ruby gem permissions during `update` (on by default; set `0` to disable)
 
 ## Your own customizations

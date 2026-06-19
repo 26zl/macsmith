@@ -7,7 +7,12 @@ set +e  # Allow optional components to fail (will be set per function)
 # Concurrent-run protection + interrupt handling.
 # TMP_FILES collects any tempfiles created by _atomic_* helpers so Ctrl-C
 # cleans them up rather than leaving ".tmp.XXXXXX" droppings.
-LOCK_FILE="/tmp/macsmith-install.lock"
+if [[ -z "${HOME:-}" ]]; then
+  echo "ERROR: HOME is not set; refusing to install into an unknown user profile" >&2
+  exit 1
+fi
+DATA_DIR="$HOME/.local/share/macsmith"
+LOCK_DIR="$DATA_DIR/install.lock.d"
 typeset -ga TMP_FILES=()
 _interrupted=0
 
@@ -18,7 +23,7 @@ _cleanup_on_exit() {
   for f in "${TMP_FILES[@]}"; do
     [[ -n "$f" ]] && rm -f "$f" 2>/dev/null || true
   done
-  rm -f "$LOCK_FILE" 2>/dev/null || true
+  rm -rf "$LOCK_DIR" 2>/dev/null || true
   if [[ "$_interrupted" == "1" ]]; then
     printf '\n\033[1;33m⚠️  Install interrupted.\033[0m\n'
     printf '  Any files already written are complete (atomic writes). Partial ones were rolled back.\n'
@@ -35,18 +40,28 @@ _on_interrupt() {
 }
 
 _acquire_lock() {
-  if [[ -f "$LOCK_FILE" ]]; then
+  mkdir -p "$DATA_DIR" 2>/dev/null || {
+    echo "ERROR: Could not create $DATA_DIR" >&2
+    exit 1
+  }
+  chmod 700 "$DATA_DIR" 2>/dev/null || true
+
+  if [[ -d "$LOCK_DIR" ]]; then
     local lock_pid=""
-    lock_pid="$(<"$LOCK_FILE")"
+    lock_pid="$(<"$LOCK_DIR/pid" 2>/dev/null)"
     if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
       echo "ERROR: Another instance of install.sh is already running (PID $lock_pid)"
-      echo "  If this is a mistake, remove the lock file: rm $LOCK_FILE"
+      echo "  If this is a mistake, remove the lock directory: rm -rf $LOCK_DIR"
       exit 1
     fi
-    # Stale lock file - previous run crashed
-    rm -f "$LOCK_FILE"
+    # Stale lock directory - previous run crashed
+    rm -rf "$LOCK_DIR"
   fi
-  echo $$ > "$LOCK_FILE"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "ERROR: Could not acquire install lock at $LOCK_DIR" >&2
+    exit 1
+  fi
+  echo $$ > "$LOCK_DIR/pid"
 }
 _acquire_lock
 # Register traps at SCRIPT scope (not inside a function). In zsh, `trap ... EXIT`
@@ -115,6 +130,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+# Honor the NO_COLOR convention (https://no-color.org): blank the ANSI codes.
+if [[ -n "${NO_COLOR:-}" ]]; then RED=''; GREEN=''; YELLOW=''; BLUE=''; NC=''; fi
 # Warnings are collected so we can replay them as a bullet list at the end —
 # otherwise users have to scroll back through all the install output to find
 # what actually went wrong.
@@ -149,7 +166,7 @@ _brew_fail_hint() {
 
 # Wrapper for curl with timeouts and retry
 _curl_safe() {
-  curl --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 "$@"
+  curl --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 "$@"
 }
 
 # Ask user for confirmation with input validation
@@ -161,16 +178,27 @@ _ask_user() {
   [[ -z "$prompt" ]] && { echo "${RED}Error: _ask_user called without prompt${NC}" >&2; return 1; }
   [[ "$default" != "Y" && "$default" != "N" ]] && default="N"
   
-  # In CI/non-interactive mode, automatically answer "yes" to all prompts
-  # This simulates a user answering "yes" to everything
-  # Allow FORCE_INTERACTIVE=1 to run real prompts in CI (e.g., yes-piped tests)
-  # Export NONINTERACTIVE so child processes (e.g., Homebrew installer) also see it
+  # Non-interactive behaviour:
+  #   - MACSMITH_YES=1          → answer "yes" to everything (full unattended install)
+  #   - NONINTERACTIVE=1 / CI=1 → answer with each prompt's OWN default, so risky
+  #                               [N] tools (Nix, MacPorts, …) are NOT force-installed
+  #                               just because the shell happens to run under CI.
+  #   - FORCE_INTERACTIVE=1     → ignore the above and prompt for real.
+  # Export NONINTERACTIVE so child processes (e.g., Homebrew installer) also see it.
   [[ -n "${NONINTERACTIVE:-}" ]] && export NONINTERACTIVE
   if [[ -n "${FORCE_INTERACTIVE:-}" ]]; then
     : # Proceed to prompt
-  elif [[ -n "${NONINTERACTIVE:-}" ]] || [[ -n "${CI:-}" ]]; then
+  elif [[ -n "${MACSMITH_YES:-}" ]]; then
     echo "$prompt [Auto: yes]"
     return 0
+  elif [[ -n "${NONINTERACTIVE:-}" ]] || [[ -n "${CI:-}" ]]; then
+    if [[ "$default" == "Y" ]]; then
+      echo "$prompt [Auto: yes (default)]"
+      return 0
+    else
+      echo "$prompt [Auto: no (default)]"
+      return 1
+    fi
   fi
   
   echo -n "$prompt "
@@ -224,8 +252,10 @@ fi
 
 # Check available disk space (need ~15GB minimum for Xcode CLT + Homebrew + tools)
 if command -v df >/dev/null 2>&1; then
-  available_gb=$(df -g / 2>/dev/null | awk 'NR==2 {print $4}')
-  if [[ -n "$available_gb" ]] && [[ "$available_gb" -lt 15 ]]; then
+  # -P forces single-line (POSIX) output so a long device name can't wrap the
+  # row and shift the Available column; -g reports in GiB.
+  available_gb=$(df -Pg / 2>/dev/null | awk 'NR==2 {print $4}')
+  if [[ "$available_gb" =~ ^[0-9]+$ ]] && [[ "$available_gb" -lt 15 ]]; then
     echo "${YELLOW}⚠️  WARNING: Low disk space detected (${available_gb}GB available)${NC}"
     echo "  ${BLUE}INFO:${NC} A full installation (Xcode CLT + Homebrew + dev tools) may need ~15-30GB"
     if ! _ask_user "Continue with limited disk space?" "N" 2>/dev/null; then
@@ -239,7 +269,7 @@ fi
 _detect_brew_prefix() {
   if [[ -d /opt/homebrew ]]; then
     echo /opt/homebrew
-  elif [[ -d /usr/local/Homebrew ]]; then
+  elif [[ -d /usr/local/Homebrew ]] || [[ -x /usr/local/bin/brew ]]; then
     echo /usr/local
   else
     echo ""
@@ -251,7 +281,6 @@ HOMEBREW_PREFIX="$(_detect_brew_prefix)"
 # Fresh-install vs upgrade detection
 # Marker file is created at the end of a successful install.
 # Presence = we've installed here before; absence = fresh machine.
-DATA_DIR="$HOME/.local/share/macsmith"
 INSTALL_STATE_FILE="$DATA_DIR/.install-state"
 
 _is_fresh_install() {
@@ -386,7 +415,9 @@ install_homebrew() {
       echo "${RED}❌ Failed to download Homebrew installer (empty response)${NC}"
       exit 1
     fi
-    /bin/bash -c "$brew_installer"
+    if ! /bin/bash -c "$brew_installer"; then
+      echo "${YELLOW}⚠️  Homebrew installer exited non-zero — verifying result below...${NC}"
+    fi
     HOMEBREW_PREFIX="$(_detect_brew_prefix)"
     if [[ -n "$HOMEBREW_PREFIX" ]]; then
       echo ""
@@ -838,7 +869,7 @@ setup_macsmith() {
     # this script from $DATA_DIR (then $script_dir == $data_dir).
     for script_file in install.sh dev-tools.sh bootstrap.sh zsh.sh macsmith.sh; do
       if [[ -f "$script_dir/$script_file" ]] && [[ ! "$script_dir/$script_file" -ef "$data_dir/$script_file" ]]; then
-        cp "$script_dir/$script_file" "$data_dir/$script_file"
+        cp "$script_dir/$script_file" "$data_dir/$script_file" || warn "Could not mirror $script_file into $data_dir ('upgrade'/'dev-tools' may be stale)"
       fi
     done
     # Helper scripts live in scripts/; copy the whole dir so uninstall-nix and
@@ -848,7 +879,7 @@ setup_macsmith() {
       local helper_file
       for helper_file in nix-macos-maintenance.sh uninstall-nix-macos.sh uninstall-macsmith.sh; do
         if [[ -f "$script_dir/scripts/$helper_file" ]] && [[ ! "$script_dir/scripts/$helper_file" -ef "$data_dir/scripts/$helper_file" ]]; then
-          cp "$script_dir/scripts/$helper_file" "$data_dir/scripts/$helper_file"
+          cp "$script_dir/scripts/$helper_file" "$data_dir/scripts/$helper_file" || warn "Could not mirror scripts/$helper_file into $data_dir"
         fi
       done
     fi
@@ -1002,16 +1033,21 @@ setup_zprofile_path_cleanup() {
       # Strip the existing managed block (start..end inclusive) so we can
       # append the up-to-date version below. Trailing blank lines around the
       # block are normalized by the printf '%s\n%s\n' below.
-      zprofile_existing="$(awk -v start_re="$zprofile_start_re" -v end_re="$zprofile_end_re" '
-        $0 ~ start_re { skip = 1; next }
-        skip && $0 ~ end_re { skip = 0; next }
+      # Match header/footer as literal substrings via index(): passing the grep
+      # ERE (with \( \. \)) into awk -v compiles a dynamic regex where the
+      # backslashes drop and (FOR .ZPROFILE) becomes a capture group, so the
+      # real paren-bearing header never matches and the old block is NOT
+      # stripped — every re-run would then append another managed block.
+      zprofile_existing="$(awk '
+        index($0, "FINAL PATH CLEANUP (FOR .ZPROFILE)") { skip = 1; next }
+        skip && index($0, "End macsmith managed block") { skip = 0; next }
         !skip { print }
       ' "$zprofile_file")"
     elif [[ "$zprofile_has_legacy" == true ]]; then
       # Legacy block was intended to be the final section. Keep everything
       # before it, then append the modern bounded block below.
-      zprofile_existing="$(awk -v start_re="$zprofile_start_re" '
-        $0 ~ start_re { exit }
+      zprofile_existing="$(awk '
+        index($0, "FINAL PATH CLEANUP (FOR .ZPROFILE)") { exit }
         { print }
       ' "$zprofile_file")"
       echo "  ${BLUE}INFO:${NC} Removed legacy unmanaged tail from .zprofile backup copy"
@@ -1032,7 +1068,7 @@ setup_zprofile_path_cleanup() {
 _detect_brew_prefix() {
   if [[ -d /opt/homebrew ]]; then
     echo /opt/homebrew
-  elif [[ -d /usr/local/Homebrew ]]; then
+  elif [[ -d /usr/local/Homebrew ]] || [[ -x /usr/local/bin/brew ]]; then
     echo /usr/local
   else
     echo ""
@@ -1418,18 +1454,28 @@ install_zsh_config() {
       _already_harvested=true
     fi
     if _is_fresh_install && [[ -z "$user_customizations" ]] && [[ "$_already_harvested" == false ]]; then
+      # Tighten umask for the whole harvest: mktemp makes 0600 temp files, and
+      # the private fallback directory below is 0700. These files briefly hold
+      # shell exports; ~/.zshrc.local keeps the non-secret ones.
+      local _harvest_old_umask; _harvest_old_umask="$(umask)"
+      umask 077
+      local harvest_tmp_dir="$DATA_DIR/tmp"
+      mkdir -p "$harvest_tmp_dir" 2>/dev/null || true
+      chmod 700 "$DATA_DIR" "$harvest_tmp_dir" 2>/dev/null || true
       local harvest_tmp harvest_sensitive
-      harvest_tmp="$(mktemp)" 2>/dev/null || harvest_tmp="/tmp/zshrc-harvest-$$"
-      harvest_sensitive="$(mktemp)" 2>/dev/null || harvest_sensitive="/tmp/zshrc-harvest-sensitive-$$"
+      harvest_tmp="$(mktemp)" 2>/dev/null || harvest_tmp="$harvest_tmp_dir/zshrc-harvest-$$"
+      harvest_sensitive="$(mktemp)" 2>/dev/null || harvest_sensitive="$harvest_tmp_dir/zshrc-harvest-sensitive-$$"
+      TMP_FILES+=("$harvest_tmp" "$harvest_sensitive")
 
       # Start by collecting user-defined alias/export lines and dropping
       # ones that match the config we're about to install (avoid duplicates).
       # shellcheck disable=SC2016
       local harvest_all
-      harvest_all="$(mktemp)" 2>/dev/null || harvest_all="/tmp/zshrc-harvest-all-$$"
-      grep -E '^\s*(alias |export )' "$HOME/.zshrc" 2>/dev/null \
-        | grep -vE '^\s*export (ZSH|ZSH_THEME|plugins|PATH|NVM_DIR|PYENV_ROOT|GEM_HOME|GEM_PATH|PIPX_DEFAULT_PYTHON|HOMEBREW_PREFIX)=' \
-        | grep -vE "alias (ls|myip|flushdns|reloadzsh|reload|change|mysqlstart|mysqlstop|mysqlstatus|mysqlrestart|mysqlconnect|update|verify|versions|upgrade|sys-install|dev-tools)=" \
+      harvest_all="$(mktemp)" 2>/dev/null || harvest_all="$harvest_tmp_dir/zshrc-harvest-all-$$"
+      TMP_FILES+=("$harvest_all")
+      grep -E '^[[:space:]]*(alias |export )' "$HOME/.zshrc" 2>/dev/null \
+        | grep -vE '^[[:space:]]*export (ZSH|ZSH_THEME|plugins|PATH|NVM_DIR|PYENV_ROOT|GEM_HOME|GEM_PATH|PIPX_DEFAULT_PYTHON|HOMEBREW_PREFIX)=' \
+        | grep -vE "alias (ls|myip|flushdns|reloadzsh|reload|change|mysqlstart|mysqlstop|mysqlstatus|mysqlrestart|mysqlconnect|update|verify|versions|upgrade|sys-install|dev-tools|doctor|uninstall-profile|uninstall-nix|uninstall-macsmith|gst|gd|gds|gp|gpl|gf|gb|gco|gcb|gcm|gca|glog)=" \
         > "$harvest_all" 2>/dev/null || true
 
       # Split: anything that looks secret-shaped (TOKEN / SECRET / PASSWORD /
@@ -1439,7 +1485,14 @@ install_zsh_config() {
       if [[ -s "$harvest_all" ]]; then
         # Specific compound patterns only. Bare `_KEY` would false-positive on
         # PATH_KEY / HOTKEY / HOMEBREW_KEY-style benign names.
-        local sensitive_re='export\s+[A-Za-z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|APIKEY|PRIVATE[_-]?KEY|PRIVATE[_-]?TOKEN|ACCESS[_-]?KEY|SECRET[_-]?KEY|SSH[_-]?KEY|GPG[_-]?KEY|SIGNING[_-]?KEY|ENCRYPTION[_-]?KEY|SESSION[_-]?KEY|BEARER|CREDENTIAL)[A-Za-z0-9_]*='
+        # Anchor on (^|[[:space:]]) — NOT `export[[:space:]]+` — so a secret-named
+        # assignment is caught anywhere on the line, including multi-assignment
+        # exports like `export EDITOR=vim GITHUB_TOKEN=...` where the secret is
+        # not the first variable after `export`.
+        # NOTE: use [[:space:]], NOT \s — macOS /usr/bin/grep is BSD grep and
+        # does not understand \s in ERE (it matches a literal 's'), which would
+        # silently disable this whole filter and leak secrets into .zshrc.local.
+        local sensitive_re='(^|[[:space:]])[A-Za-z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|API[_-]?KEY|APIKEY|PRIVATE[_-]?KEY|PRIVATE[_-]?TOKEN|ACCESS[_-]?KEY|SECRET[_-]?KEY|SSH[_-]?KEY|GPG[_-]?KEY|SIGNING[_-]?KEY|ENCRYPTION[_-]?KEY|SESSION[_-]?KEY|BEARER|CREDENTIAL)[A-Za-z0-9_]*='
         grep -iE "$sensitive_re" "$harvest_all" > "$harvest_sensitive" 2>/dev/null || true
         grep -ivE "$sensitive_re" "$harvest_all" > "$harvest_tmp" 2>/dev/null || true
       fi
@@ -1468,6 +1521,7 @@ install_zsh_config() {
       fi
 
       rm -f "$harvest_tmp" "$harvest_sensitive" "$harvest_all" 2>/dev/null || true
+      umask "$_harvest_old_umask"
     fi
   fi
 
@@ -1552,18 +1606,9 @@ refresh_environment() {
     fi
   fi
   
-  # Check macsmith
-  if ! command -v macsmith >/dev/null 2>&1; then
-    local macsmith_path="$local_bin/macsmith"
-    if [[ -x "$macsmith_path" ]]; then
-      # It exists but isn't in PATH yet - PATH should have been updated above
-      # Just verify it's accessible
-      if [[ -x "$macsmith_path" ]]; then
-        : # Command exists, PATH should work now
-      fi
-    fi
-  fi
-  
+  # (PATH was rebuilt above; the CI/non-interactive block below independently
+  # re-checks macsmith, so no extra no-op verification is needed here.)
+
   echo "${GREEN}✅ Environment refreshed${NC}"
   
   # In CI/non-interactive mode, verify critical commands are available
@@ -1636,8 +1681,9 @@ main() {
   fi
   echo ""
   echo "Next steps:"
-  echo "  1. Run: source ~/.zshrc"
-  echo "     (Loads 'reload'/'reloadzsh' aliases and all shell configuration)"
+  echo "  1. Open a new terminal (or run: exec zsh -l)"
+  echo "     PATH changes live in ~/.zprofile, which only a login shell re-reads —"
+  echo "     'source ~/.zshrc' alone won't pick up Homebrew or ~/.local/bin."
   echo "  2. (Optional) Install language tools:"
   echo "     - Run './dev-tools.sh' for Python/Node/Rust/Ruby/Swift/Go/Java/.NET toolchains"
   echo "  3. Useful commands now available:"

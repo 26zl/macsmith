@@ -71,7 +71,10 @@ _get_nix_version() {
 # Check if marker exists in file
 _has_marker() {
     local file="$1"
-    if [[ -f "$file" ]] && grep -q "$NIX_MARKER_START" "$file" 2>/dev/null; then
+    # Anchor to column 1 so this stays consistent with _remove_marker_block,
+    # which only strips markers at line start (index==1). A loose match here
+    # would report "present" for a block the remover then silently can't touch.
+    if [[ -f "$file" ]] && grep -q "^${NIX_MARKER_START}" "$file" 2>/dev/null; then
         return 0
     fi
     return 1
@@ -83,7 +86,11 @@ _remove_marker_block() {
     if [[ ! -f "$file" ]]; then
         return 0
     fi
-    
+
+    # Back the file up before rewriting it — this edits the user's shell config
+    # and gets no confirmation in non-interactive mode.
+    cp "$file" "$file.macsmith-bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+
     # Use a temporary file to avoid in-place editing issues
     local temp_file orig_perms
     temp_file=$(mktemp)
@@ -93,11 +100,20 @@ _remove_marker_block() {
     # Remove lines between markers (inclusive). Pass the constants as awk vars
     # so the markers stay in a single source of truth with the declarations at
     # the top of this file — previously NIX_MARKER_END was unused (SC2034).
-    awk -v start="$NIX_MARKER_START" -v end="$NIX_MARKER_END" '
+    # END guard: if a BEGIN marker has no matching END (file hand-edited, or a
+    # prior write was truncated), in_block would stay set to EOF and every line
+    # after BEGIN would be deleted. Exit non-zero in that case and leave the
+    # file untouched rather than silently destroying the user's shell config.
+    if ! awk -v start="$NIX_MARKER_START" -v end="$NIX_MARKER_END" '
         index($0, start) == 1 { in_block=1; next }
         index($0, end) == 1 { in_block=0; next }
         !in_block { print }
-    ' "$file" > "$temp_file"
+        END { if (in_block) exit 3 }
+    ' "$file" > "$temp_file"; then
+        rm -f "$temp_file"
+        _log_warning "Unterminated Nix marker block in $file (missing '$NIX_MARKER_END'); left unchanged."
+        return 1
+    fi
 
     mv "$temp_file" "$file"
     chmod "$orig_perms" "$file" 2>/dev/null || true
@@ -148,18 +164,22 @@ cmd_ensure_path() {
         # Only prompt if we have a TTY (interactive mode)
         if [[ -t 0 ]]; then
             _log_info "Would you like to remove it from $ZSHRC? (y/N)"
-            read -r response
+            # || response="" maps EOF/Ctrl-D to the safe default (keep the hook)
+            # instead of aborting the whole run under set -e.
+            read -r response || response=""
             if [[ "$response" =~ ^[Yy]$ ]]; then
-                _remove_marker_block "$ZSHRC"
-                _log_success "Removed Nix hook from $ZSHRC"
+                if _remove_marker_block "$ZSHRC"; then
+                    _log_success "Removed Nix hook from $ZSHRC"
+                fi
             else
                 _log_info "Keeping hook in $ZSHRC (may cause duplicate sourcing)"
             fi
         else
             # Non-interactive mode: automatically remove from .zshrc
             _log_info "Non-interactive mode: automatically removing Nix hook from $ZSHRC"
-            _remove_marker_block "$ZSHRC"
-            _log_success "Removed Nix hook from $ZSHRC"
+            if _remove_marker_block "$ZSHRC"; then
+                _log_success "Removed Nix hook from $ZSHRC"
+            fi
         fi
     fi
     

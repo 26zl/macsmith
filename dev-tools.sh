@@ -11,12 +11,17 @@
 set +e  # Allow optional components to fail
 
 # Concurrent-run protection
-LOCK_FILE="/tmp/macsmith-devtools.lock"
+if [[ -z "${HOME:-}" ]]; then
+  echo "ERROR: HOME is not set; refusing to install tools into an unknown user profile" >&2
+  exit 1
+fi
+DATA_DIR="$HOME/.local/share/macsmith"
+LOCK_DIR="$DATA_DIR/devtools.lock.d"
 _dt_interrupted=0
 
 _dt_cleanup_on_exit() {
   local exit_code=$?
-  rm -f "$LOCK_FILE" 2>/dev/null || true
+  rm -rf "$LOCK_DIR" 2>/dev/null || true
   if [[ "$_dt_interrupted" == "1" ]]; then
     printf '\n\033[1;33m⚠️  dev-tools interrupted.\033[0m\n'
     printf '  No persistent files are written by this script, so nothing is corrupted.\n'
@@ -32,17 +37,27 @@ _dt_on_interrupt() {
 }
 
 _acquire_lock() {
-  if [[ -f "$LOCK_FILE" ]]; then
+  mkdir -p "$DATA_DIR" 2>/dev/null || {
+    echo "ERROR: Could not create $DATA_DIR" >&2
+    exit 1
+  }
+  chmod 700 "$DATA_DIR" 2>/dev/null || true
+
+  if [[ -d "$LOCK_DIR" ]]; then
     local lock_pid=""
-    lock_pid="$(<"$LOCK_FILE")"
+    lock_pid="$(<"$LOCK_DIR/pid" 2>/dev/null)"
     if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
       echo "ERROR: Another instance of dev-tools.sh is already running (PID $lock_pid)"
-      echo "  If this is a mistake, remove the lock file: rm $LOCK_FILE"
+      echo "  If this is a mistake, remove the lock directory: rm -rf $LOCK_DIR"
       exit 1
     fi
-    rm -f "$LOCK_FILE"
+    rm -rf "$LOCK_DIR"
   fi
-  echo $$ > "$LOCK_FILE"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "ERROR: Could not acquire dev-tools lock at $LOCK_DIR" >&2
+    exit 1
+  fi
+  echo $$ > "$LOCK_DIR/pid"
 }
 _acquire_lock
 # Register traps at SCRIPT scope. In zsh `trap ... EXIT` inside a function
@@ -86,7 +101,7 @@ NC='\033[0m' # No Color
 install_warnings=0
 
 warn() {
-  ((install_warnings++))
+  ((install_warnings++)) || true   # pre-increment returns 0 (false) on first call; don't let it trip callers
   echo "${YELLOW}⚠️  $1${NC}"
 }
 
@@ -119,13 +134,25 @@ _ask_user() {
   [[ -z "$prompt" ]] && { echo "${RED}Error: _ask_user called without prompt${NC}" >&2; return 1; }
   [[ "$default" != "Y" && "$default" != "N" ]] && default="N"
   
-  # In CI/non-interactive mode, automatically answer "yes" to all prompts
-  # Allow FORCE_INTERACTIVE=1 to run real prompts in CI (e.g., yes-piped tests)
+  # Non-interactive behaviour:
+  #   - MACSMITH_YES=1          → answer "yes" to everything (full unattended run)
+  #   - NONINTERACTIVE=1 / CI=1 → answer with each prompt's OWN default, so [N]
+  #                               tools aren't force-installed just because we
+  #                               happen to run under CI.
+  #   - FORCE_INTERACTIVE=1     → ignore the above and prompt for real.
   if [[ -n "${FORCE_INTERACTIVE:-}" ]]; then
     : # Proceed to prompt
-  elif [[ -n "${NONINTERACTIVE:-}" ]] || [[ -n "${CI:-}" ]]; then
+  elif [[ -n "${MACSMITH_YES:-}" ]]; then
     echo "$prompt [Auto: yes]"
     return 0
+  elif [[ -n "${NONINTERACTIVE:-}" ]] || [[ -n "${CI:-}" ]]; then
+    if [[ "$default" == "Y" ]]; then
+      echo "$prompt [Auto: yes (default)]"
+      return 0
+    else
+      echo "$prompt [Auto: no (default)]"
+      return 1
+    fi
   fi
   
   echo -n "$prompt "
@@ -305,7 +332,9 @@ fi
 _detect_brew_prefix() {
   if [[ -d /opt/homebrew ]]; then
     echo /opt/homebrew
-  elif [[ -d /usr/local/Homebrew ]]; then
+  elif [[ -d /usr/local/Homebrew ]] || [[ -x /usr/local/bin/brew ]]; then
+    # Intel/relocated Homebrew may have /usr/local/bin/brew without the
+    # /usr/local/Homebrew dir; match the install.sh/zsh.sh/macsmith.sh copies.
     echo /usr/local
   else
     echo ""
@@ -437,7 +466,7 @@ install_pyenv() {
     else
       echo "  ${BLUE}INFO:${NC} Installing latest Python via pyenv..."
       local latest_python
-      latest_python=$(pyenv install --list 2>/dev/null | /usr/bin/grep -E "^\s+3\.[0-9]+\.[0-9]+$" | /usr/bin/grep -v "dev\|a\|b\|rc" | /usr/bin/tail -1 | /usr/bin/xargs)
+      latest_python=$(pyenv install --list 2>/dev/null | /usr/bin/grep -E "^[[:space:]]+3\.[0-9]+\.[0-9]+$" | /usr/bin/tail -1 | /usr/bin/xargs)
       if [[ -n "$latest_python" ]]; then
         echo "  ${BLUE}INFO:${NC} Installing Python $latest_python (this may take a few minutes)..."
         if pyenv install "$latest_python" 2>/dev/null; then
@@ -475,7 +504,7 @@ install_pyenv() {
         # Brief delay for pyenv shims to initialize after sourcing
         sleep 1
         local latest_python
-        latest_python=$(pyenv install --list 2>/dev/null | /usr/bin/grep -E "^\s+3\.[0-9]+\.[0-9]+$" | /usr/bin/grep -v "dev\|a\|b\|rc" | /usr/bin/tail -1 | /usr/bin/xargs)
+        latest_python=$(pyenv install --list 2>/dev/null | /usr/bin/grep -E "^[[:space:]]+3\.[0-9]+\.[0-9]+$" | /usr/bin/tail -1 | /usr/bin/xargs)
         if [[ -n "$latest_python" ]]; then
           echo "  ${BLUE}INFO:${NC} Installing Python $latest_python (this may take a few minutes)..."
           if pyenv install "$latest_python" 2>/dev/null; then
@@ -499,6 +528,7 @@ install_pyenv() {
 # Function to install nvm
 install_nvm() {
   local NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  export NVM_DIR   # the nvm install.sh we pipe to bash reads this from the env; a function-local alone is invisible to the child
   if [[ -s "$NVM_DIR/nvm.sh" ]] || type nvm >/dev/null 2>&1; then
     echo "${GREEN}✅ nvm already installed${NC}"
     # Check if Node.js is installed via nvm
@@ -528,14 +558,14 @@ install_nvm() {
     echo "  Installing nvm..."
     # Get latest nvm version dynamically from GitHub API
     local nvm_version=""
-    nvm_version="$(/usr/bin/curl -fsSL --connect-timeout 10 https://api.github.com/repos/nvm-sh/nvm/releases/latest 2>/dev/null | /usr/bin/grep '"tag_name"' | /usr/bin/sed -E 's/.*"([^"]+)".*/\1/' || echo "")"
+    nvm_version="$(/usr/bin/curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 https://api.github.com/repos/nvm-sh/nvm/releases/latest 2>/dev/null | /usr/bin/grep '"tag_name"' | /usr/bin/sed -E 's/.*"([^"]+)".*/\1/' || echo "")"
     if [[ -z "$nvm_version" || ! "$nvm_version" =~ ^v[0-9] ]]; then
       echo "${RED}❌ Failed to determine latest nvm version from GitHub API${NC}"
       warn "nvm installation failed (could not fetch version)"
       return 1
     fi
     echo "  ${BLUE}INFO:${NC} Installing nvm $nvm_version..."
-    if /usr/bin/curl --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${nvm_version}/install.sh" | /bin/bash; then
+    if /usr/bin/curl --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 --proto '=https' --tlsv1.2 -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${nvm_version}/install.sh" | /bin/bash; then
       echo "${GREEN}✅ nvm installed${NC}"
       # Install Node.js LTS after nvm is installed
       if [[ -s "$NVM_DIR/nvm.sh" ]]; then
@@ -679,9 +709,12 @@ install_chruby() {
     
     if [[ "$ruby_installed" == false ]]; then
       echo "  ${BLUE}INFO:${NC} Installing latest Ruby via ruby-install..."
-      # Get latest stable Ruby version using same method as macsmith.sh
+      # Get latest stable Ruby version using same method as macsmith.sh.
+      # `ruby-install --list ruby` prints 4-space-indented bare versions (e.g.
+      # "    3.4.2") under a "  ruby:" header — NOT "ruby X.Y.Z". Match the
+      # indented bare-version lines and take field 1.
       local latest_ruby
-      latest_ruby=$(ruby-install --list ruby 2>/dev/null | /usr/bin/awk '/^ruby [0-9]+\.[0-9]+\.[0-9]+$/ {print $2}' | /usr/bin/sort -V | /usr/bin/tail -n1)
+      latest_ruby=$(ruby-install --list ruby 2>/dev/null | /usr/bin/awk '/^[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+$/ {print $1}' | /usr/bin/sort -V | /usr/bin/tail -n1)
       
       if [[ -n "$latest_ruby" ]]; then
         echo "  ${BLUE}INFO:${NC} Installing Ruby $latest_ruby (this may take a few minutes)..."
@@ -751,7 +784,7 @@ install_rustup() {
   
   if _ask_user "${YELLOW}📦 rustup not found. Install rustup (Rust toolchain manager)?" "Y"; then
     echo "  Installing rustup..."
-    if /usr/bin/curl --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | /bin/bash -s -- -y; then
+    if /usr/bin/curl --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | /bin/bash -s -- -y --no-modify-path; then
       echo "${GREEN}✅ rustup installed${NC}"
       # Source cargo env if available
       if [[ -f "$HOME/.cargo/env" ]]; then
@@ -867,8 +900,25 @@ install_swiftly() {
 
   if _ask_user "${YELLOW}📦 swiftly not found. Install swiftly (Swift toolchain manager)?" "N"; then
     echo "  Installing swiftly..."
-    if /usr/bin/curl --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 -fsSL https://swiftlang.org/swiftly-install.sh | /bin/bash; then
+    # swiftly 1.0+ ships as a signed .pkg; the old swiftly-install.sh shell
+    # installer is deprecated and the swiftlang.org URL is stale. `installer
+    # -target CurrentUserHomeDirectory` installs into $HOME — no sudo needed.
+    local _swiftly_pkg
+    _swiftly_pkg="$(mktemp "${TMPDIR:-/tmp}/swiftly.XXXXXX.pkg")" || {
+      warn "swiftly installation failed (could not create temporary package file)"
+      return 1
+    }
+    if /usr/bin/curl --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2 --proto '=https' --tlsv1.2 -fsSL https://download.swift.org/swiftly/darwin/swiftly.pkg -o "$_swiftly_pkg" \
+       && /usr/sbin/installer -pkg "$_swiftly_pkg" -target CurrentUserHomeDirectory; then
+      /bin/rm -f "$_swiftly_pkg" 2>/dev/null || true
+      # init writes ~/.swiftly/env.sh that the PATH wiring below sources.
+      "$HOME/.swiftly/bin/swiftly" init --quiet-shell-followup --assume-yes 2>/dev/null || true
       echo "${GREEN}✅ swiftly installed${NC}"
+      # The installer doesn't update the CURRENT shell's PATH, so the version
+      # commands below would fail and Swift would never get installed. Wire
+      # swiftly into PATH here (it ships an env file; fall back to its bin dir).
+      [[ -s "$HOME/.swiftly/env.sh" ]] && source "$HOME/.swiftly/env.sh" 2>/dev/null
+      export PATH="$HOME/.swiftly/bin:$PATH"
       # Install latest Swift after swiftly is installed
       echo "  ${BLUE}INFO:${NC} Installing latest Swift via swiftly..."
       local latest_swift
@@ -887,6 +937,7 @@ install_swiftly() {
         echo "  ${YELLOW}⚠️  Could not determine latest Swift version (you can install manually later with: swiftly install <version>)${NC}"
       fi
     else
+      /bin/rm -f "$_swiftly_pkg" 2>/dev/null || true
       warn "swiftly installation failed"
     fi
   fi
@@ -1018,7 +1069,7 @@ install_dotnet() {
 # ============================================================================
 
 install_uv()   { _install_brew_tool uv   "uv (fast Python package manager)"  "Y"; }
-install_bun()  { _install_brew_tool bun  "bun (JS/TS runtime + pkg manager)" "Y" "oven-sh/bun"; }
+install_bun()  { _install_brew_tool bun  "bun (JS/TS runtime + pkg manager)" "Y"; }  # bun is in homebrew-core; the oven-sh/bun tap is redundant
 install_pnpm() { _install_brew_tool pnpm "pnpm (fast Node package manager)"  "Y"; }
 install_deno() { _install_brew_tool deno "deno (secure JS/TS runtime)"       "N"; }
 
