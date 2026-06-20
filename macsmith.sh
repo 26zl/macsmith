@@ -853,8 +853,10 @@ _go_update_toolchain() {
   # Update all globally installed Go tools
   echo "  Checking for globally installed Go tools..."
   
-  # Find Go binary directories
-  local go_bin_dirs=()
+  # Find Go binary directories. The -U (keep-unique) array auto-dedups, so the
+  # default layout where $GOPATH/bin and $HOME/go/bin are the same path collapses
+  # to one entry — otherwise the scan loop below processes every tool twice.
+  local -aU go_bin_dirs
   local gobin=$(go env GOBIN 2>/dev/null || echo "")
   local gopath=$(go env GOPATH 2>/dev/null || echo "")
   local home_go_bin="$HOME/go/bin"
@@ -1364,15 +1366,16 @@ EOF
     brew cleanup 2>/dev/null || brew_errors+=("cleanup")
     brew cleanup -s 2>/dev/null || true
     
-    if brew doctor 2>/dev/null; then
+    # brew doctor exits non-zero for benign/informational findings on a healthy
+    # system (deprecated formulae, unbrewed headers, ...). Surface its output so
+    # the user sees WHY, but do NOT add it to brew_errors / fail `update` — a
+    # cosmetic doctor note must not flip the whole run's exit code.
+    local _doctor_out
+    if _doctor_out="$(brew doctor 2>&1)"; then
       echo "  Homebrew doctor check passed"
     else
-      if [[ -n "${CI:-}" ]]; then
-        echo "  ${BLUE}INFO:${NC} brew doctor reported issues (CI mode)"
-      else
-        brew_errors+=("doctor")
-        echo "  ${RED}WARNING:${NC} brew doctor reported issues"
-      fi
+      echo "  ${BLUE}INFO:${NC} brew doctor reported issues (usually cosmetic):"
+      printf '%s\n' "$_doctor_out" | sed 's/^/    /'
     fi
     
     # Report summary of Homebrew issues
@@ -1919,14 +1922,18 @@ except Exception:
       if [[ -n "$outdated_packages" ]]; then
         echo "  Upgrading global packages..."
         local failed_packages=()
+        local _pip_err=""
         while IFS= read -r package; do
           [[ -z "$package" ]] && continue
           # Skip pip, setuptools, wheel if Homebrew Python (Homebrew manages these)
           if [[ "$is_homebrew_python" == true ]] && [[ "$package" == "pip" || "$package" == "setuptools" || "$package" == "wheel" ]]; then
             continue
           fi
-          if ! "$pybin" -m pip install -U "$package" 2>/dev/null; then
+          # Capture output so a failure (e.g. cryptography needing a build
+          # toolchain) shows WHY instead of a bare "Failed to upgrade: <name>".
+          if ! _pip_err="$("$pybin" -m pip install -U "$package" 2>&1)"; then
             failed_packages+=("$package")
+            printf '%s\n' "$_pip_err" | tail -3 | sed 's/^/      /'
           fi
         done <<< "$outdated_packages"
         
@@ -2924,6 +2931,13 @@ update() {
 
 # ================================ VERIFY ===================================
 
+# Bounded version probe shared by verify()/versions(): time-cap each external
+# `--version` call (macOS has no timeout(1), so use perl's alarm — the same
+# idiom as the gem-update timeout) and detach stdin from the terminal so a tool
+# that drops into a REPL or daemon/network prompt (scala, clojure, gradle, mvn)
+# can never hang the run. Caller adds its own 2>/dev/null|2>&1 and pipes.
+_probe() { perl -e 'alarm shift; exec @ARGV' 10 "$@" </dev/null; }
+
 verify() {
   _ensure_system_path || true
   echo "${GREEN}==> Verify $(date)${NC}"
@@ -3324,25 +3338,28 @@ verify() {
     miss "PostgreSQL"
   fi
   
-  # Modern language tooling (installed via dev-tools.sh)
+  # Modern language tooling (installed via dev-tools.sh). Probes are stdin-
+  # detached + time-capped via _probe so a tool that opens a REPL/daemon prompt
+  # can't hang verify; an empty result is a WARN, not a bogus "OK ()".
+  local _ver=""
   for _tool in uv bun pnpm deno; do
     if command -v "$_tool" >/dev/null 2>&1; then
-      ok "$_tool" "$("$_tool" --version 2>/dev/null | head -n1)"
+      _ver="$(_probe "$_tool" --version 2>/dev/null | head -n1)"
+      if [[ -n "$_ver" ]]; then ok "$_tool" "$_ver"; else warn "$_tool" "version probe failed/timed out"; fi
     fi
   done
   # JVM ecosystem (opt-in batch in dev-tools.sh).
   # kotlin writes the version to stderr; gradle's first stdout line is blank
   # (the actual "Gradle X.Y" line is further down). Per-tool detection so all
   # six render a real version instead of "OK ()".
-  local _ver=""
   for _tool in kotlin scala clojure gradle mvn groovy; do
     if command -v "$_tool" >/dev/null 2>&1; then
       case "$_tool" in
-        kotlin) _ver="$(kotlin -version 2>&1 | head -n1)" ;;
-        gradle) _ver="$(gradle --version 2>&1 | grep -E '^Gradle ' | head -n1)" ;;
-        *)      _ver="$("$_tool" --version 2>/dev/null | head -n1)" ;;
+        kotlin) _ver="$(_probe kotlin -version 2>&1 | head -n1)" ;;
+        gradle) _ver="$(_probe gradle --version 2>&1 | grep -E '^Gradle ' | head -n1)" ;;
+        *)      _ver="$(_probe "$_tool" --version 2>/dev/null | head -n1)" ;;
       esac
-      ok "$_tool" "$_ver"
+      if [[ -n "$_ver" ]]; then ok "$_tool" "$_ver"; else warn "$_tool" "version probe failed/timed out"; fi
     fi
   done
   unset _tool _ver
@@ -3755,7 +3772,7 @@ versions() {
   local _ver="" _dots=""
   for _tool in uv bun pnpm deno; do
     if command -v "$_tool" >/dev/null 2>&1; then
-      _ver="$("$_tool" --version 2>/dev/null | head -n1)"
+      _ver="$(_probe "$_tool" --version 2>/dev/null | head -n1)"
       # Strip leading "tool " prefix so we don't print the name twice
       # (e.g. `uv --version` -> "uv 0.11.7" becomes "0.11.7").
       _ver="${_ver#"$_tool" }"
@@ -3768,9 +3785,9 @@ versions() {
   for _tool in kotlin scala clojure gradle mvn groovy; do
     if command -v "$_tool" >/dev/null 2>&1; then
       case "$_tool" in
-        kotlin) _ver="$(kotlin -version 2>&1 | head -n1)" ;;
-        gradle) _ver="$(gradle --version 2>&1 | grep -E '^Gradle ' | head -n1)" ;;
-        *)      _ver="$("$_tool" --version 2>/dev/null | head -n1)" ;;
+        kotlin) _ver="$(_probe kotlin -version 2>&1 | head -n1)" ;;
+        gradle) _ver="$(_probe gradle --version 2>&1 | grep -E '^Gradle ' | head -n1)" ;;
+        *)      _ver="$(_probe "$_tool" --version 2>/dev/null | head -n1)" ;;
       esac
       _dots="$(printf '%*s' $((15 - ${#_tool})) '' | tr ' ' '.')"
       printf '%s %s %s\n' "$_tool" "$_dots" "$_ver"
@@ -3947,6 +3964,7 @@ _self_upgrade() {
   mkdir -p "$local_bin" 2>/dev/null || true
   if [[ -f "$extract_dir/macsmith.sh" ]]; then
     local _ms_tmp="${local_bin}/.macsmith.tmp.$$"
+    _UPGRADE_TMP_FILES+=("$_ms_tmp")
     if cp "$extract_dir/macsmith.sh" "$_ms_tmp" \
        && chmod +x "$_ms_tmp" \
        && mv -f "$_ms_tmp" "$local_bin/macsmith"; then
@@ -3987,6 +4005,7 @@ _self_upgrade() {
     fi
 
     local _zsh_tmp="${zshrc}.tmp.$$"
+    _UPGRADE_TMP_FILES+=("$_zsh_tmp")
     if printf '%s\n' "$new_zshrc_content" > "$_zsh_tmp" && mv -f "$_zsh_tmp" "$zshrc"; then
       echo "  Updated: ~/.zshrc${user_section:+ (backup created)}"
     else
@@ -4306,10 +4325,15 @@ echo $$ > "$LOCK_FILE"
 # _self_upgrade no longer installs its own EXIT/INT trap (which fired on
 # function return and shadowed the Ctrl-C-aborts-the-run handler below).
 _UPGRADE_TMP_DIR=""
+# Tempfiles written next to their targets during _self_upgrade (.macsmith.tmp.$$,
+# .zshrc.tmp.$$). Tracked here so a Ctrl-C between write and `mv -f` doesn't leave
+# orphaned dotfiles in ~/.local/bin and $HOME.
+_UPGRADE_TMP_FILES=()
 # shellcheck disable=SC2329  # invoked via trap below (shellcheck can't track it in this large zsh file)
 _cleanup_lock() {
   rm -f "$LOCK_FILE"
   [[ -n "$_UPGRADE_TMP_DIR" ]] && rm -rf "$_UPGRADE_TMP_DIR"
+  (( ${#_UPGRADE_TMP_FILES[@]} )) && rm -f "${_UPGRADE_TMP_FILES[@]}"
 }
 # Ctrl-C must abort the WHOLE run, not just the current sub-step. A plain
 # `trap 'rm -f lock' INT` (the old form) cleaned the lock but did not exit, so
