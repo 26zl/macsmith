@@ -1910,10 +1910,23 @@ EOF
     if [[ "$is_system_python" == true ]]; then
       echo "  ${BLUE}INFO:${NC} Skipping global packages upgrade (system Python)"
     else
-      # Upgrade user-installed packages for both pyenv and Homebrew Python
+      # Upgrade genuinely user-installed packages. Homebrew's Python is
+      # externally-managed (PEP 668): pip refuses to touch its site-packages,
+      # and those packages are brew-managed anyway (e.g. `cryptography` is a brew
+      # formula). Trying to `pip install -U` them fails on EVERY run. So for
+      # Homebrew Python, scope the scan to the pip --user site and install with
+      # --user; everything in brew's tree is left to `brew upgrade`. pyenv Python
+      # is a normal environment — upgrade in place as before.
       _ensure_system_path
+      local pip_list_scope=() pip_user_flag=()
+      if [[ "$is_homebrew_python" == true ]]; then
+        local _user_site="$("$pybin" -m site --user-site 2>/dev/null)"
+        pip_list_scope=(--path "$_user_site")
+        pip_user_flag=(--user)
+        echo "  ${BLUE}INFO:${NC} Homebrew Python: site-packages are brew-managed (run 'brew upgrade'); only pip --user packages are upgraded here"
+      fi
       local outdated_packages
-      outdated_packages="$("$pybin" -m pip list --outdated --format=json 2>/dev/null | "$pybin" -c 'import json,sys
+      outdated_packages="$("$pybin" -m pip list --outdated "${pip_list_scope[@]}" --format=json 2>/dev/null | "$pybin" -c 'import json,sys
 try:
     for p in json.load(sys.stdin):
         print(p["name"])
@@ -1931,7 +1944,7 @@ except Exception:
           fi
           # Capture output so a failure (e.g. cryptography needing a build
           # toolchain) shows WHY instead of a bare "Failed to upgrade: <name>".
-          if ! _pip_err="$("$pybin" -m pip install -U "$package" 2>&1)"; then
+          if ! _pip_err="$("$pybin" -m pip install -U "${pip_user_flag[@]}" "$package" 2>&1)"; then
             failed_packages+=("$package")
             printf '%s\n' "$_pip_err" | tail -3 | sed 's/^/      /'
           fi
