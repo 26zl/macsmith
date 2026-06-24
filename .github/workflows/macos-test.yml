@@ -703,7 +703,15 @@ jobs:
           Path("update_output.txt").write_text(output)
           lines = output.splitlines()
           print("\n".join(lines[-200:]))
-          
+
+          # macsmith propagates real subsystem failures into its exit code, so
+          # surface it. Kept non-fatal (a warning) because optional-tool hiccups
+          # (e.g. transient network) are expected on CI runners; swap the warning
+          # for sys.exit(result.returncode) to hard-gate on it.
+          print(f"macsmith update exit code: {result.returncode}")
+          if result.returncode != 0:
+              print(f"::warning::macsmith update exited non-zero ({result.returncode}); a subsystem reported a failure")
+
           if "Update finished" not in output:
               print("Update did not report completion")
               sys.exit(1)

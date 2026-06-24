@@ -250,6 +250,14 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+# Enforce the documented minimum (macOS 13 Ventura). Homebrew and several tools
+# below assume a recent OS; failing fast beats a confusing downstream error.
+os_major="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
+if [[ "$os_major" =~ ^[0-9]+$ ]] && (( os_major < 13 )); then
+  echo "${RED}❌ Error: macsmith requires macOS 13 (Ventura) or later (detected $(sw_vers -productVersion 2>/dev/null))${NC}"
+  exit 1
+fi
+
 # Check available disk space (need ~15GB minimum for Xcode CLT + Homebrew + tools)
 if command -v df >/dev/null 2>&1; then
   # -P forces single-line (POSIX) output so a long device name can't wrap the
@@ -1417,7 +1425,6 @@ _rotate_zshrc_backups() {
 install_zsh_config() {
   local zshrc_backup="$HOME/.zshrc.backup.$(date +%Y%m%d_%H%M%S)"
   local user_customizations=""
-  local MANAGED_MARKER="# Managed by macsmith"
 
   # Use REPO_ROOT that was detected at script start
   local script_dir="$REPO_ROOT"
@@ -1598,7 +1605,6 @@ refresh_environment() {
   fi
   
   # Verify critical commands are now available
-  local missing_commands=()
   if [[ -n "$HOMEBREW_PREFIX" ]] && ! command -v brew >/dev/null 2>&1; then
     # Try to add brew to PATH if it exists but isn't found
     if [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then

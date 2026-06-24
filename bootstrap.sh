@@ -82,6 +82,13 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+# Enforce the documented minimum (macOS 13 Ventura)
+os_major="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
+if [[ "$os_major" =~ ^[0-9]+$ ]] && (( os_major < 13 )); then
+  printf '%bERROR: macsmith requires macOS 13 (Ventura) or later (detected %s)%b\n' "$RED" "$(sw_vers -productVersion 2>/dev/null)" "$NC" >&2
+  exit 1
+fi
+
 # Enforce HTTPS on the repo URL
 case "$REPO_URL" in
   https://*) ;;

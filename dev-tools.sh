@@ -328,6 +328,13 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+# Enforce the documented minimum (macOS 13 Ventura)
+os_major="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
+if [[ "$os_major" =~ ^[0-9]+$ ]] && (( os_major < 13 )); then
+  echo "${RED}❌ Error: macsmith requires macOS 13 (Ventura) or later (detected $(sw_vers -productVersion 2>/dev/null))${NC}"
+  exit 1
+fi
+
 # Detect Homebrew installation prefix
 _detect_brew_prefix() {
   if [[ -d /opt/homebrew ]]; then
@@ -464,6 +471,10 @@ install_pyenv() {
     if pyenv versions --bare 2>/dev/null | /usr/bin/grep -q .; then
       echo "  ${BLUE}INFO:${NC} Python versions already installed via pyenv"
     else
+      if [[ "$CHECK_MODE" == true ]]; then
+        echo "  ${YELLOW}📦 pyenv: would install latest Python (dry-run)${NC}"
+        return 0
+      fi
       echo "  ${BLUE}INFO:${NC} Installing latest Python via pyenv..."
       local latest_python
       latest_python=$(pyenv install --list 2>/dev/null | /usr/bin/grep -E "^[[:space:]]+3\.[0-9]+\.[0-9]+$" | /usr/bin/tail -1 | /usr/bin/xargs)
@@ -537,6 +548,10 @@ install_nvm() {
       if nvm list 2>/dev/null | /usr/bin/grep -qE "v[0-9]+\.[0-9]+\.[0-9]+"; then
         echo "  ${BLUE}INFO:${NC} Node.js versions already installed via nvm"
       else
+        if [[ "$CHECK_MODE" == true ]]; then
+          echo "  ${YELLOW}📦 nvm: would install Node.js LTS (dry-run)${NC}"
+          return 0
+        fi
         echo "  ${BLUE}INFO:${NC} Installing Node.js LTS via nvm..."
         if nvm install --lts 2>/dev/null; then
           nvm use --lts 2>/dev/null || true
@@ -766,6 +781,10 @@ install_rustup() {
     if rustup toolchain list 2>/dev/null | /usr/bin/grep -qE "stable|default"; then
       echo "  ${BLUE}INFO:${NC} Rust toolchain already installed"
     else
+      if [[ "$CHECK_MODE" == true ]]; then
+        echo "  ${YELLOW}📦 rustup: would install Rust stable (dry-run)${NC}"
+        return 0
+      fi
       echo "  ${BLUE}INFO:${NC} Installing Rust stable toolchain..."
       if rustup install stable 2>/dev/null; then
         rustup default stable 2>/dev/null || true
@@ -808,23 +827,19 @@ install_rustup() {
 # Function to install swiftly
 install_swiftly() {
   local swiftly_installed=false
-  local swiftly_path=""
-  
+
   # Check if swiftly is available as a command
   if command -v swiftly >/dev/null 2>&1; then
     swiftly_installed=true
-    swiftly_path=$(command -v swiftly)
   # Check common swiftly locations (swiftly installs to $HOME/.swiftly/bin/swiftly)
   elif [[ -f "$HOME/.swiftly/bin/swiftly" ]]; then
     swiftly_installed=true
-    swiftly_path="$HOME/.swiftly/bin/swiftly"
     # Add to PATH if not already there
     if [[ ":$PATH:" != *":$HOME/.swiftly/bin:"* ]]; then
       export PATH="$HOME/.swiftly/bin:$PATH"
     fi
   elif [[ -f "$HOME/.local/bin/swiftly" ]]; then
     swiftly_installed=true
-    swiftly_path="$HOME/.local/bin/swiftly"
     # Add to PATH if not already there
     if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
       export PATH="$HOME/.local/bin:$PATH"
@@ -841,7 +856,6 @@ install_swiftly() {
     for path in "${possible_paths[@]}"; do
       if [[ -f "$path" ]]; then
         swiftly_installed=true
-        swiftly_path="$path"
         # Add directory to PATH if not already there
         local dir_path=$(dirname "$path")
         if [[ ":$PATH:" != *":$dir_path:"* ]]; then
@@ -873,6 +887,10 @@ install_swiftly() {
     if [[ "$_swift_installed" == true ]]; then
       echo "  ${BLUE}INFO:${NC} Swift versions already installed via swiftly"
     else
+      if [[ "$CHECK_MODE" == true ]]; then
+        echo "  ${YELLOW}📦 swiftly: would install latest Swift (dry-run)${NC}"
+        return 0
+      fi
       echo "  ${BLUE}INFO:${NC} Installing latest Swift via swiftly..."
       local latest_swift
       # swiftly list-available outputs "Swift X.Y.Z" format, extract version number (2nd field)

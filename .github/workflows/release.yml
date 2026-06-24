@@ -32,6 +32,7 @@ jobs:
     # Run for every trigger so release/workflow_dispatch can't bypass CI gating
     outputs:
       all-success: ${{ steps.check.outputs.all-success }}
+      head-sha: ${{ steps.check.outputs.head-sha }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@v2
@@ -85,7 +86,10 @@ jobs:
               throw new Error(`Unsupported trigger: ${context.eventName}`);
             }
             console.log(`Gating on commit: ${headSha}`);
-            
+            // Expose the gated SHA so create-release checks out exactly this
+            // commit (not the moving branch tip) and packages what was validated.
+            core.setOutput('head-sha', headSha);
+
             // Required workflows that must succeed
             const requiredWorkflows = ['Checks', 'macOS Test', 'Security Scan'];
             
@@ -193,6 +197,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          # Pin to the exact SHA that passed gating, not the moving branch tip,
+          # so `git archive HEAD` packages the commit that was validated.
+          ref: ${{ needs.check-workflows.outputs.head-sha }}
           fetch-depth: 0
           fetch-tags: true
 

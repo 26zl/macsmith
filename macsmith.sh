@@ -101,6 +101,8 @@ _project_file_marker_in_dir() {
     composer.json composer.lock
     mix.exs mix.lock
     pom.xml build.gradle settings.gradle gradle.lockfile
+    .swift-version Package.swift Package.resolved
+    .python-version .nvmrc .node-version .ruby-version .tool-versions
   )
 
   for marker in "${project_markers[@]}"; do
@@ -1111,7 +1113,8 @@ _update_impl() {
         echo "${RED}[Swift]${NC} swiftly not installed"; return 1
       fi
       echo "${GREEN}[Swift]${NC} swiftly self-update + install latest"
-      swiftly self-update && swiftly install latest --use
+      # Run from $HOME so `install --use` doesn't rewrite a project-local/ancestor .swift-version.
+      swiftly self-update && (cd "$HOME" && swiftly install latest --use)
       return $?
       ;;
     go|golang)
@@ -1453,6 +1456,7 @@ EOF
     # Report summary of MacPorts issues
     if [[ ${#port_errors[@]} -gt 0 ]]; then
       echo "  MacPorts issues: ${port_errors[*]}"
+      _update_failed=1
     fi
     fi  # End of else block for non-CI MacPorts update
   fi
@@ -1814,6 +1818,7 @@ EOF
       # Report summary of conda issues
       if [[ ${#conda_errors[@]} -gt 0 ]]; then
         echo "  conda issues: ${conda_errors[*]}"
+        _update_failed=1
       fi
     else
       # Miniforge installed but not initialized in PATH - detect dynamically
@@ -1897,6 +1902,7 @@ EOF
           # Report summary of conda issues
           if [[ ${#conda_errors[@]} -gt 0 ]]; then
             echo "  conda issues: ${conda_errors[*]}"
+            _update_failed=1
           fi
         fi
       else
@@ -1964,6 +1970,7 @@ except Exception:
     # Report summary of Python issues
     if [[ ${#python_errors[@]} -gt 0 ]]; then
       echo "  Python issues: ${python_errors[*]}"
+      _update_failed=1
     fi
     
     # Refresh command hash table after Python package updates
@@ -2370,8 +2377,9 @@ except Exception:
         echo "  Latest available: Swift $swift_target_version"
         # Use --assume-yes to avoid prompts
         if swiftly install "$swift_target_version" --assume-yes 2>/dev/null; then
-          # Explicitly switch active toolchain (--use on install may not switch when already installed)
-          swiftly use "$swift_target_version" 2>/dev/null || true
+          # Explicitly switch active toolchain (--use on install may not switch when already installed).
+          # Run from $HOME so swiftly doesn't rewrite a project-local/ancestor .swift-version.
+          (cd "$HOME" && swiftly use "$swift_target_version") 2>/dev/null || true
           hash -r 2>/dev/null || true
           # Verify the switch actually happened
           local verify_active="$(swiftly list 2>/dev/null | grep '(in use)' || true)"
@@ -2624,6 +2632,7 @@ except Exception:
     if [[ ${#dotnet_errors[@]} -gt 0 ]]; then
       echo "  .NET issues: ${dotnet_errors[*]}"
       echo "  ${BLUE}INFO:${NC} If .NET was installed via official installer, update manually from: https://dotnet.microsoft.com/download"
+      _update_failed=1
     fi
   else
     echo "${GREEN}[.NET]${NC} Not found - skipping"
@@ -2684,6 +2693,7 @@ except Exception:
     
     if [[ ${#mas_errors[@]} -gt 0 ]]; then
       echo "  mas issues: ${mas_errors[*]}"
+      _update_failed=1
     fi
   fi
 

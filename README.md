@@ -27,10 +27,10 @@ One command installs Homebrew, Starship, language toolchains, and optional sysad
 
 ## Install
 
-Recommended — pin to the latest release (`v2026.05.28-4f9bb1f`, published 2026-05-28):
+Recommended — pin to the latest release (`v2026.06.20-fcf3f5c`, published 2026-06-20):
 
 ```bash
-MACSMITH_REF=v2026.05.28-4f9bb1f
+MACSMITH_REF=v2026.06.20-fcf3f5c
 curl -fsSL "https://raw.githubusercontent.com/26zl/macsmith/${MACSMITH_REF}/bootstrap.sh" \
   | MACSMITH_REF="$MACSMITH_REF" zsh
 ```
