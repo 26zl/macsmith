@@ -27,10 +27,11 @@ One command installs Homebrew, Starship, language toolchains, and optional sysad
 
 ## Install
 
-Recommended — pin to the latest release (`v2026.06.20-fcf3f5c`, published 2026-06-20):
+Recommended — pin to a release. Grab the newest tag from
+[Releases](https://github.com/26zl/macsmith/releases/latest) and set it once:
 
 ```bash
-MACSMITH_REF=v2026.06.20-fcf3f5c
+MACSMITH_REF=<TAG>   # e.g. v2026.06.25-1ee2ae5 — copy the latest from Releases
 curl -fsSL "https://raw.githubusercontent.com/26zl/macsmith/${MACSMITH_REF}/bootstrap.sh" \
   | MACSMITH_REF="$MACSMITH_REF" zsh
 ```
@@ -141,7 +142,7 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 - Project-local files (`package.json`, `Gemfile`, `go.mod`, `.swift-version`, `.python-version`, `.nvmrc`, …).
 - System Ruby at `/usr/bin/ruby`, system Python, macOS defaults, login items.
 - `~/.ssh/`, `~/.gnupg/`, `~/.aws/`, and everything in `~/.config/` except `starship.toml` when it's missing.
-- `/Applications/`, `/Library/`, `/System/`.
+- `/Applications/`, `/Library/`, `/System/` — macsmith never edits existing files here. (Package managers you opt into still write their own: Homebrew casks install apps, Nix/MacPorts add system components and launch daemons.)
 
 **Reversing it**:
 
@@ -168,6 +169,7 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 - `NONINTERACTIVE=1` — run without prompts, accepting each prompt's default (`[Y]` => yes, `[N]` => no)
 - `MACSMITH_YES=1` — explicit unattended mode; answer "yes" to every prompt
 - `MACSMITH_FIX_RUBY_GEMS=1` — auto-fix Ruby gem permissions during `update` (on by default; set `0` to disable)
+- `MACSMITH_CLEAN_PYENV=1` / `MACSMITH_CLEAN_NVM=1` / `MACSMITH_CLEAN_CHRUBY=1` — **opt in** to pruning old language-runtime versions during `update` (off by default, so a version another project pins via `.python-version`/`.nvmrc`/`.ruby-version` is never deleted). Pair with `MACSMITH_{PYENV,NVM,CHRUBY}_KEEP="ver1,ver2"` to keep extra versions.
 - `MACSMITH_UPDATE_WORKDIR=<dir>` — safe working directory for `update` package-manager calls
 - `MACSMITH_ALLOW_PROJECT_MODIFY=1` — explicit opt-in to run `update` from the current project directory
 

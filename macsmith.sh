@@ -88,6 +88,20 @@ _is_disabled() {
   return 1
 }
 
+# Opt-in check: true only when explicitly turned on. Used by the destructive
+# runtime-version cleanup (pyenv/nvm/chruby) so an unset value means "don't
+# delete" — deleting a version another project pins via .python-version /
+# .nvmrc / .ruby-version must never be the default.
+_is_enabled() {
+  local value="${1:-}"
+  case "${value:l}" in
+    1|true|yes|on|enable|enabled)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 _project_file_marker_in_dir() {
   local dir="${1:-${PWD:-$(pwd)}}"
   local marker=""
@@ -120,39 +134,23 @@ _project_file_marker_in_dir() {
 _is_project_directory() {
   local current_dir="${PWD:-$(pwd)}"
   local home_dir="${HOME:-}"
-  local project_marker=""
-  
+
   # If we're in home directory, it's not a project (global packages are OK to update)
   if [[ "$current_dir" == "$home_dir" ]]; then
     return 1  # Not a project directory
   fi
-  
-  project_marker="$(_project_file_marker_in_dir "$current_dir")" || return 1
 
-  # Check for project indicators (but not in home directory). If we have
-  # project files, we're in a project directory.
-  if [[ -n "$project_marker" ]]; then
-    # Additional check: if we're in a subdirectory of home that looks like a project
-    # (e.g., ~/projects/myapp), treat it as a project
-    if [[ "$current_dir" == "$home_dir"/* ]]; then
-      # Check if it's a common project location (projects, dev, code, etc.)
-      local relative_path="${current_dir#"$home_dir"/}"
-      local first_dir="${relative_path%%/*}"
-      case "$first_dir" in
-        projects|dev|code|workspace|workspaces|src|sources|repos|repositories|git|github|gitlab|bitbucket)
-          return 0  # Likely a project directory
-          ;;
-        *)
-          # If it has project files, it's a project
-          return 0
-          ;;
-      esac
-    else
-      # Not in home directory and has project files - definitely a project
-      return 0
+  # Walk up from $PWD checking every ancestor for project markers — running
+  # `update` from repo/src must still detect the repo root's .git/go.mod/etc.
+  # Stop at $HOME (its dotfiles repo / loose markers don't count) and at /.
+  local dir="$current_dir"
+  while [[ -n "$dir" && "$dir" != "/" && "$dir" != "$home_dir" ]]; do
+    if _project_file_marker_in_dir "$dir" >/dev/null 2>&1; then
+      return 0  # Project directory (marker found here or in an ancestor)
     fi
-  fi
-  
+    dir="${dir:h}"  # zsh: parent directory
+  done
+
   return 1  # Not a project directory
 }
 
@@ -1164,7 +1162,8 @@ Usage: update [target]
 
 Targets:
   all                 Run the full update (default; Homebrew, all language
-                      runtimes, package managers, version cleanups).
+                      runtimes, package managers). Old-version pruning is
+                      opt-in — see MACSMITH_CLEAN_* below.
   brew | homebrew     brew update + upgrade + cleanup
   macports            sudo port selfupdate + upgrade outdated
   node | nvm | npm    Install/use latest LTS, bump npm
@@ -1183,6 +1182,10 @@ Targets:
 Environment:
   MACSMITH_ALLOW_PROJECT_MODIFY=1  Opt in to running update from a project directory
   MACSMITH_UPDATE_WORKDIR=DIR       Safe working directory for update package-manager calls
+  MACSMITH_CLEAN_PYENV=1            Opt in to pruning old pyenv versions (off by default)
+  MACSMITH_CLEAN_NVM=1              Opt in to pruning old Node versions (off by default)
+  MACSMITH_CLEAN_CHRUBY=1           Opt in to pruning old chruby rubies (off by default)
+  MACSMITH_{PYENV,NVM,CHRUBY}_KEEP  Extra versions to keep when the matching cleanup is on
 EOF
       return 0
       ;;
@@ -1981,8 +1984,8 @@ except Exception:
   fi
 
   if command -v pyenv >/dev/null 2>&1 && [[ -n "$pyenv_target" && "$pyenv_target" != "system" ]]; then
-    if _is_disabled "${MACSMITH_CLEAN_PYENV:-}"; then
-      echo "${GREEN}[pyenv]${NC} Cleanup disabled; set MACSMITH_CLEAN_PYENV=1 or unset to enable"
+    if ! _is_enabled "${MACSMITH_CLEAN_PYENV:-}"; then
+      echo "${GREEN}[pyenv]${NC} Old-version cleanup is opt-in (protects project .python-version pins); set MACSMITH_CLEAN_PYENV=1 to prune"
     else
       local keep_list_raw="${MACSMITH_PYENV_KEEP:-}"
       keep_list_raw="${keep_list_raw//,/ }"
@@ -2042,8 +2045,8 @@ except Exception:
       nvm reinstall-packages "$prev_nvm" || true
     fi
     if [[ -n "$active_nvm" && "$active_nvm" != "system" ]]; then
-      if _is_disabled "${MACSMITH_CLEAN_NVM:-}"; then
-        echo "${GREEN}[nvm]${NC} Cleanup disabled; set MACSMITH_CLEAN_NVM=1 or unset to enable"
+      if ! _is_enabled "${MACSMITH_CLEAN_NVM:-}"; then
+        echo "${GREEN}[nvm]${NC} Old-version cleanup is opt-in (protects project .nvmrc pins); set MACSMITH_CLEAN_NVM=1 to prune"
       else
         local keep_list_raw="${MACSMITH_NVM_KEEP:-}"
         keep_list_raw="${keep_list_raw//,/ }"
@@ -2248,8 +2251,8 @@ except Exception:
   if [[ "$chruby_available" == "true" ]] && [[ -n "$chruby_target" ]]; then
     local rubies_root="$HOME/.rubies"
     if [[ -d "$rubies_root" ]]; then
-      if _is_disabled "${MACSMITH_CLEAN_CHRUBY:-}"; then
-        echo "${GREEN}[chruby]${NC} Cleanup disabled; set MACSMITH_CLEAN_CHRUBY=1 or unset to enable"
+      if ! _is_enabled "${MACSMITH_CLEAN_CHRUBY:-}"; then
+        echo "${GREEN}[chruby]${NC} Old-version cleanup is opt-in (protects project .ruby-version pins); set MACSMITH_CLEAN_CHRUBY=1 to prune"
       else
         local keep_list_raw="${MACSMITH_CHRUBY_KEEP:-}"
         keep_list_raw="${keep_list_raw//,/ }"
@@ -3827,6 +3830,54 @@ versions() {
 readonly GITHUB_REPO="26zl/macsmith"
 readonly DATA_DIR="$HOME/.local/share/macsmith"
 
+# Regenerate the managed ~/.zprofile PATH block during `upgrade`. install.sh
+# owns this block; `upgrade` historically skipped it, so existing installs never
+# picked up login-shell PATH fixes (Homebrew-first ordering, dedup, Nix order)
+# without re-running sys-install. We slice the block straight out of the freshly
+# extracted install.sh — between its full-line markers — instead of duplicating
+# the heredoc here, so the two can never drift. Best-effort: failure warns but
+# does not fail the upgrade. Markers must be matched as anchored full lines: the
+# loose substring also appears in install.sh's own block-management code.
+_refresh_zprofile_block() {
+  local src="$1"
+  local zprofile="$HOME/.zprofile"
+  [[ -f "$src" ]] || return 0
+
+  local block
+  block="$(awk '
+    /^# =+ FINAL PATH CLEANUP \(FOR \.ZPROFILE\) =+/ { grab = 1 }
+    grab { print }
+    grab && /^# End macsmith managed block$/ { exit }
+  ' "$src")"
+
+  # Refuse to touch the file unless we extracted a complete, bounded block.
+  if ! printf '%s' "$block" | grep -q '^# End macsmith managed block$'; then
+    echo "  ${YELLOW}WARN:${NC} could not extract .zprofile block from install.sh; left ~/.zprofile unchanged"
+    return 0
+  fi
+
+  # Strip any existing managed block (markers as literal substrings — on the
+  # user's own .zprofile they only appear as the managed block, no collision).
+  local existing=""
+  if [[ -f "$zprofile" ]]; then
+    existing="$(awk '
+      index($0, "FINAL PATH CLEANUP (FOR .ZPROFILE)") { skip = 1; next }
+      skip && index($0, "End macsmith managed block") { skip = 0; next }
+      !skip { print }
+    ' "$zprofile")"
+    cp "$zprofile" "$zprofile.backup-$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+  fi
+
+  # Atomic write: tempfile next to target, then mv over.
+  local tmp="${zprofile}.upgrade.$$.tmp"
+  if printf '%s\n%s\n' "$existing" "$block" > "$tmp" 2>/dev/null && mv -f "$tmp" "$zprofile"; then
+    echo "  refreshed ~/.zprofile (PATH block)"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+    echo "  ${YELLOW}WARN:${NC} failed to refresh ~/.zprofile"
+  fi
+}
+
 _self_upgrade() {
   echo "${GREEN}=== macsmith - Self-Upgrade ===${NC}"
   echo ""
@@ -3889,8 +3940,9 @@ _self_upgrade() {
   echo ""
   echo "Upgrading ${BLUE}$local_version${NC} -> ${BLUE}$remote_version${NC}"
 
-  # Prefer our signed release asset (has matching .sha256) over GitHub's
-  # auto-generated zipball_url which has no checksum we publish.
+  # Prefer our published release asset (has a matching .sha256 we verify) over
+  # GitHub's auto-generated zipball_url which has no checksum we publish.
+  # NOTE: .sha256 is an integrity checksum, not a cryptographic signature.
   local asset_url="" sha_url="" zipball_url=""
   asset_url="$(echo "$api_response" | sed -n 's/.*"browser_download_url": *"\(https:\/\/[^"]*macsmith-[^"]*\.zip\)".*/\1/p' | grep -v '\.sha256' | head -n1)"
   sha_url="$(echo "$api_response" | sed -n 's/.*"browser_download_url": *"\(https:\/\/[^"]*macsmith-[^"]*\.zip\.sha256\)".*/\1/p' | head -n1)"
@@ -3935,7 +3987,7 @@ _self_upgrade() {
     # Fallback: no packaged asset found (pre-release-pipeline tags etc.).
     # This path is UNVERIFIED — refuse by default and require explicit opt-in.
     if [[ "${MACSMITH_ALLOW_UNSIGNED_UPGRADE:-0}" != "1" ]]; then
-      echo "${RED}❌ Refusing to upgrade: no signed release asset for this tag.${NC}"
+      echo "${RED}❌ Refusing to upgrade: no checksummed release asset for this tag.${NC}"
       echo "  The only available source is GitHub's auto-generated zipball, which"
       echo "  has no matching checksum we publish, so we cannot verify its integrity."
       echo ""
@@ -3964,7 +4016,7 @@ _self_upgrade() {
     return 1
   fi
 
-  # Locate the payload root. Our signed release asset (release.yml builds it via
+  # Locate the payload root. Our published release asset (release.yml builds it via
   # `cd $PKG && zip ... .`) has the files at the zip ROOT, while GitHub's
   # auto-generated zipball wraps everything in one top-level dir. Don't assume
   # either layout — find macsmith.sh and treat its directory as the root.
@@ -4078,6 +4130,10 @@ _self_upgrade() {
     done
     unset _helper _bin _tmp _local_bin
   fi
+
+  # Refresh the managed ~/.zprofile PATH block (install.sh owns it; upgrade used
+  # to skip it). Best-effort — never flips upgrade_failed.
+  _refresh_zprofile_block "$extract_dir/install.sh"
 
   # Cleanup temp dir
   rm -rf "$tmp_dir"
@@ -4430,10 +4486,10 @@ case "${1:-}" in
     echo "                        (try: macsmith uninstall-profile help)"
     echo ""
     echo "Optional environment variables:"
-    echo "  MACSMITH_FIX_RUBY_GEMS=0|disabled    Disable Ruby gem auto-fix"
-    echo "  MACSMITH_CLEAN_PYENV=0|disabled      Disable pyenv cleanup (MACSMITH_PYENV_KEEP=...)"
-    echo "  MACSMITH_CLEAN_NVM=0|disabled        Disable Node cleanup (MACSMITH_NVM_KEEP=...)"
-    echo "  MACSMITH_CLEAN_CHRUBY=0|disabled     Disable chruby cleanup (MACSMITH_CHRUBY_KEEP=...)"
+    echo "  MACSMITH_FIX_RUBY_GEMS=0|disabled    Disable Ruby gem auto-fix (on by default)"
+    echo "  MACSMITH_CLEAN_PYENV=1               Opt in to pruning old pyenv versions (MACSMITH_PYENV_KEEP=...)"
+    echo "  MACSMITH_CLEAN_NVM=1                 Opt in to pruning old Node versions (MACSMITH_NVM_KEEP=...)"
+    echo "  MACSMITH_CLEAN_CHRUBY=1              Opt in to pruning old chruby rubies (MACSMITH_CHRUBY_KEEP=...)"
     echo "  MACSMITH_SWIFT_SNAPSHOTS=1           Enable Swift development snapshot updates"
     echo "  MACSMITH_UPDATE_CHECK=1              Opt in to shell-startup update check (off by default)"
     echo "  MACSMITH_ALLOW_UNSIGNED_UPGRADE=1    Opt in to upgrade from unsigned GitHub zipball"

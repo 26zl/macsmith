@@ -75,3 +75,33 @@ jobs:
             echo ""
             echo "OK: No dangerous code patterns found"
           fi
+
+      - name: Network installer allowlist
+        run: |
+          echo "=== Checking network URLs against allowlist ==="
+          allow=".github/network-installers.allow"
+          if [[ ! -f "$allow" ]]; then
+            echo "::error::Missing $allow"
+            exit 1
+          fi
+          # Every https URL on a curl/wget/_curl_safe line must be pre-approved.
+          # A new remote-exec or download source fails CI until it's reviewed and
+          # added to the allowlist in the same PR.
+          approved="$(grep -vE '^\s*(#|$)' "$allow")"
+          unexpected=0
+          while IFS= read -r url; do
+            [[ -z "$url" ]] && continue
+            if ! grep -Fxq "$url" <<<"$approved"; then
+              echo "::error::Unapproved network URL: $url  (review, then add to $allow)"
+              unexpected=1
+            fi
+          done < <(
+            grep -rhE '(_curl_safe|curl|wget)' --include='*.sh' --include='*.zsh' --exclude-dir=.git . \
+              | grep -oE 'https://[^ "'"'"'`)]+' \
+              | sed -E 's/[.,]+$//' \
+              | sort -u
+          )
+          if [[ $unexpected -eq 0 ]]; then
+            echo "OK: all network URLs are allowlisted"
+          fi
+          exit $unexpected

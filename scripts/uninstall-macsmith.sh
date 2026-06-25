@@ -50,7 +50,9 @@ while [[ $# -gt 0 ]]; do
 Usage: uninstall-macsmith.sh [--dry-run] [--yes]
 
   --dry-run   Print every intended action, change nothing.
-  --yes, -y   Skip confirmation prompts.
+  --yes, -y   Skip confirmation prompts. Exception: removing
+              ~/.config/starship.toml is never auto-confirmed (it may be
+              user-edited) — it is kept under --yes; delete it manually.
   -h, --help  Show this help.
 
 Removes macsmith artifacts from your home directory:
@@ -349,7 +351,11 @@ log_section "5. Starship config"
 if [[ -f "$STARSHIP_CONFIG" ]]; then
   log_info "found: $STARSHIP_CONFIG"
   log_info "(Starship itself is a Homebrew formula — this is just the config file.)"
-  if confirm "Remove $STARSHIP_CONFIG?"; then
+  # --yes must NOT auto-delete a possibly user-edited prompt config; require a
+  # real interactive yes. Unattended runs keep the file and tell you how to drop it.
+  if [[ $ASSUME_YES -eq 1 ]]; then
+    log_info "keeping $STARSHIP_CONFIG (--yes does not auto-remove it; 'rm $STARSHIP_CONFIG' to delete)"
+  elif confirm "Remove $STARSHIP_CONFIG?"; then
     safe_rm "$STARSHIP_CONFIG"
     # Flag only when the file is truly gone (safe_rm is a no-op under --dry-run).
     if [[ ! -e "$STARSHIP_CONFIG" && ! -L "$STARSHIP_CONFIG" ]]; then

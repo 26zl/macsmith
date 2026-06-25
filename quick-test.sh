@@ -192,6 +192,31 @@ else
   echo "${GREEN}✅ OK: update runs package-manager commands outside project directories${NC}"
 fi
 
+# Nested case: a subdir with NO markers of its own, inside a project. Detection
+# must walk up to the project root and still relocate to the safe workdir.
+qt_nested_dir="$qt_project_dir/src/deep"
+mkdir -p "$qt_nested_dir"
+: > "$qt_brew_log"
+(
+  cd "$qt_nested_dir" || exit 1
+  env \
+    HOME="$qt_home_dir" \
+    PATH="$qt_fake_bin:$PATH" \
+    MACSMITH_UPDATE_WORKDIR="$qt_safe_dir" \
+    MACSMITH_FAKE_BREW_PWD_LOG="$qt_brew_log" \
+    NO_COLOR=1 \
+    zsh "$repo_root/macsmith.sh" update brew > "$qt_output" 2>&1
+)
+if grep -Fxq "$qt_nested_dir" "$qt_brew_log"; then
+  echo "FAIL: update ran package-manager commands from a project subdirectory"
+  test_failed=1
+elif ! grep -Fxq "$qt_safe_dir" "$qt_brew_log"; then
+  echo "FAIL: update did not detect the parent project root from a subdirectory"
+  test_failed=1
+else
+  echo "${GREEN}✅ OK: update detects the project root from a nested subdirectory${NC}"
+fi
+
 qt_same_output="$qt_tmp_root/same-workdir-output.txt"
 : > "$qt_brew_log"
 

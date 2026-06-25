@@ -204,7 +204,7 @@ _ask_user() {
 _brew_batch() {
   local label="$1"; shift
   local brew="$HOMEBREW_PREFIX/bin/brew"
-  [[ -z "$HOMEBREW_PREFIX" ]] || [[ ! -x "$brew" ]] && { warn "$label: Homebrew not available"; return 0; }
+  if [[ -z "$HOMEBREW_PREFIX" || ! -x "$brew" ]]; then warn "$label: Homebrew not available"; return 0; fi
   local total=$#
   local skipped=0
   local to_install=()
@@ -243,7 +243,7 @@ _brew_batch() {
 _brew_batch_cask() {
   local label="$1"; shift
   local brew="$HOMEBREW_PREFIX/bin/brew"
-  [[ -z "$HOMEBREW_PREFIX" ]] || [[ ! -x "$brew" ]] && { warn "$label: Homebrew not available"; return 0; }
+  if [[ -z "$HOMEBREW_PREFIX" || ! -x "$brew" ]]; then warn "$label: Homebrew not available"; return 0; fi
   local total=$#
   local skipped=0
   local to_install=()

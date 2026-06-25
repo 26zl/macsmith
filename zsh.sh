@@ -132,12 +132,16 @@ do
 done
 unset _chruby_auto
 
-# Activate latest installed Ruby 
 # Ruby installation is handled by 'update' command, not during shell startup
 if command -v chruby >/dev/null 2>&1; then
-  _ruby_target=$(chruby 2>/dev/null | sed -E 's/^[* ]+//' | grep -E '^ruby-[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
-  [[ -n "$_ruby_target" ]] && chruby "$_ruby_target" 2>/dev/null || true
-  unset _ruby_target
+  # Respect a project .ruby-version first (chruby_auto walks up from $PWD).
+  typeset -f chruby_auto >/dev/null 2>&1 && chruby_auto 2>/dev/null || true
+  # Only fall back to the latest installed Ruby when no project pin selected one.
+  if [[ -z "${RUBY_ROOT:-}" ]]; then
+    _ruby_target=$(chruby 2>/dev/null | sed -E 's/^[* ]+//' | grep -E '^ruby-[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+    [[ -n "$_ruby_target" ]] && chruby "$_ruby_target" 2>/dev/null || true
+    unset _ruby_target
+  fi
 fi
 _setup_gem_path() {
   if ! command -v ruby >/dev/null 2>&1; then return 0; fi
@@ -234,9 +238,9 @@ fi
 # Lazy load NVM to speed up shell startup
 # NVM is only sourced when nvm, node, or npm is actually invoked.
 # The lazy-load body is inlined into every shim — a shared helper function
-# can mysteriously vanish from long-lived subshells (e.g. Claude Code's
-# persistent Bash tool), leaving the shims calling a non-existent helper.
-# Inlining keeps each shim self-contained.
+# can mysteriously vanish from long-lived persistent subshells (e.g. some
+# editor/agent embedded shells), leaving the shims calling a non-existent
+# helper. Inlining keeps each shim self-contained.
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 
 nvm() {
@@ -246,31 +250,33 @@ nvm() {
   nvm "$@"
 }
 
+# `nvm use --silent` (no version) reads a project .nvmrc walking up from $PWD;
+# fall back to the default version only when no .nvmrc is found/usable.
 node() {
   unset -f nvm node npm npx corepack 2>/dev/null
   [[ -s "$NVM_DIR/nvm.sh" ]] && \. "$NVM_DIR/nvm.sh"
-  nvm use default > /dev/null 2>&1 || true
+  nvm use --silent > /dev/null 2>&1 || nvm use default > /dev/null 2>&1 || true
   command node "$@"
 }
 
 npm() {
   unset -f nvm node npm npx corepack 2>/dev/null
   [[ -s "$NVM_DIR/nvm.sh" ]] && \. "$NVM_DIR/nvm.sh"
-  nvm use default > /dev/null 2>&1 || true
+  nvm use --silent > /dev/null 2>&1 || nvm use default > /dev/null 2>&1 || true
   command npm "$@"
 }
 
 npx() {
   unset -f nvm node npm npx corepack 2>/dev/null
   [[ -s "$NVM_DIR/nvm.sh" ]] && \. "$NVM_DIR/nvm.sh"
-  nvm use default > /dev/null 2>&1 || true
+  nvm use --silent > /dev/null 2>&1 || nvm use default > /dev/null 2>&1 || true
   command npx "$@"
 }
 
 corepack() {
   unset -f nvm node npm npx corepack 2>/dev/null
   [[ -s "$NVM_DIR/nvm.sh" ]] && \. "$NVM_DIR/nvm.sh"
-  nvm use default > /dev/null 2>&1 || true
+  nvm use --silent > /dev/null 2>&1 || nvm use default > /dev/null 2>&1 || true
   command corepack "$@"
 }
 
