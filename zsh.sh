@@ -277,6 +277,11 @@ corepack() {
 # ================================= Rust ====================================
 [[ -s "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 
+# ================================== Go =====================================
+# `go install` drops binaries in $GOPATH/bin (default ~/go/bin); put it on PATH.
+go_bin="${GOPATH:-$HOME/go}/bin"
+[[ -d "$go_bin" ]] && _add_to_path "$go_bin"
+
 # ================================ conda/miniforge ===========================
 # Initialize conda/miniforge if installed but not already in PATH
 if ! command -v conda >/dev/null 2>&1; then
