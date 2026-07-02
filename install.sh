@@ -242,13 +242,8 @@ _ask_user() {
   [[ -z "$prompt" ]] && { echo "${RED}Error: _ask_user called without prompt${NC}" >&2; return 1; }
   [[ "$default" != "Y" && "$default" != "N" ]] && default="N"
   
-  # Non-interactive behaviour:
-  #   - MACSMITH_YES=1          → answer "yes" to everything (full unattended install)
-  #   - NONINTERACTIVE=1 / CI=1 → answer with each prompt's OWN default, so risky
-  #                               [N] tools (Nix, MacPorts, …) are NOT force-installed
-  #                               just because the shell happens to run under CI.
-  #   - FORCE_INTERACTIVE=1     → ignore the above and prompt for real.
-  # Export NONINTERACTIVE so child processes (e.g., Homebrew installer) also see it.
+  # Non-interactive: MACSMITH_YES=1 → yes to all; NONINTERACTIVE/CI=1 → each prompt's
+  # own default; FORCE_INTERACTIVE=1 → real prompts. Export so child processes see it.
   if _env_true "${NONINTERACTIVE:-}"; then
     export NONINTERACTIVE=1
   fi
@@ -1746,10 +1741,8 @@ main() {
   setup_nix_path || { warn "Nix PATH setup failed"; ((install_failures++)); }
   install_sysadmin_tools || ((install_failures++))
 
-  # The critical path already exited on failure above, so reaching here means
-  # the machine is set up — record the state marker regardless of optional
-  # component failures. Otherwise a single failed optional package (e.g. a cask)
-  # would leave the machine flagged "fresh" forever (perpetual harvest/mode/doctor).
+  # Critical path already exited on failure above, so record the marker regardless of
+  # optional failures — else one failed optional package flags the machine "fresh" forever.
   _mark_install_state || { warn "Failed to write install state marker"; ((install_failures++)); }
   if (( install_failures > 0 )); then
     warn "Marked install state, but $install_failures optional component(s) failed"

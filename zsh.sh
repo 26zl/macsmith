@@ -442,10 +442,7 @@ if [[ -n "$openjdk_path" && -d "$openjdk_path" ]]; then
 fi
 
 # ================================ UPDATE ===================================
-# Update, verify, and versions functions have been moved to a standalone script
-# to keep .zshrc lean and to improve shell startup performance.
-# Alias to the macsmith script:
-# Uses XDG_DATA_HOME if set, otherwise fall back to ~/.local/bin
+# update/verify/versions live in the macsmith binary; alias to it.
 macsmith_bin="$HOME/.local/bin/macsmith"
 if [[ -x "$macsmith_bin" ]]; then
   alias update="$macsmith_bin update"

@@ -794,10 +794,8 @@ _go_update_toolchain() {
           # Skip if it's the go binary itself
           [[ "$tool_name" == "go" ]] && continue
           
-          # Try to get module path from binary using go version -m
-          # NOTE: do not name this `module_path` — that's a zsh tied array
-          # (MODULE_PATH) and re-declaring it as a scalar on the second loop
-          # iteration triggers `inconsistent type for assignment`.
+          # Don't name this `module_path`: zsh ties it to $MODULE_PATH (array), so
+          # reusing it as a scalar next iteration errors "inconsistent type".
           local mod_path=""
           local module_info=$(go version -m "$binary" 2>/dev/null | grep -E "^[[:space:]]*mod[[:space:]]+" | head -1 || echo "")
 
@@ -1318,11 +1316,7 @@ EOF
     port_output="$(sudo port -v selfupdate 2>&1)" || port_exit_code=$?
 
     if [[ $port_exit_code -eq 0 ]]; then
-      # Check if output indicates an actual update occurred
-      # MacPorts shows "Adding port" when new ports are added
-      # "Ports successfully parsed: X" where X > 0 means new ports were added
-      # "Up-to-date ports skipped" means no new ports
-      # Note: "Ports successfully parsed: 1" can be just re-parsing, not a real update
+      # "Adding port" or "parsed: 2+" = real update; "parsed: 0/1" = re-parse only.
       if echo "$port_output" | grep -qiE "Adding port"; then
         echo "  MacPorts updated successfully"
       elif echo "$port_output" | grep -qiE "(Ports successfully parsed:[[:space:]]+[2-9]|Ports successfully parsed:[[:space:]]+[0-9]{2,})"; then
@@ -2321,10 +2315,8 @@ except Exception:
     echo "  Setting default toolchain to stable..."
     rustup default stable 2>/dev/null || rust_errors+=("default_toolchain")
     
-    # Add common rustup components if not already installed.
-    # `rustup component add` prints "info: component 'X' is up to date" when
-    # nothing changes; capture stdout/stderr and only report success if the
-    # output mentions an installation/update.
+    # `rustup component add` says "up to date" when unchanged; only report success
+    # on actual install output.
     echo "  Ensuring rustup components are installed..."
     local rustup_component_output=""
     local rustup_component_exit=0

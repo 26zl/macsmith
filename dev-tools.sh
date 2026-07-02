@@ -206,12 +206,8 @@ _ask_user() {
   [[ -z "$prompt" ]] && { echo "${RED}Error: _ask_user called without prompt${NC}" >&2; return 1; }
   [[ "$default" != "Y" && "$default" != "N" ]] && default="N"
   
-  # Non-interactive behaviour:
-  #   - MACSMITH_YES=1          → answer "yes" to everything (full unattended run)
-  #   - NONINTERACTIVE=1 / CI=1 → answer with each prompt's OWN default, so [N]
-  #                               tools aren't force-installed just because we
-  #                               happen to run under CI.
-  #   - FORCE_INTERACTIVE=1     → ignore the above and prompt for real.
+  # Non-interactive: MACSMITH_YES=1 → yes to all; NONINTERACTIVE/CI=1 → each prompt's
+  # own default; FORCE_INTERACTIVE=1 → real prompts.
   if _env_true "${FORCE_INTERACTIVE:-}"; then
     : # Proceed to prompt
   elif _env_true "${MACSMITH_YES:-}"; then
@@ -977,7 +973,7 @@ install_swiftly() {
     echo "  Installing swiftly..."
     # Install swiftly's signed package into the current user's home.
     local _swiftly_pkg
-    _swiftly_pkg="$(mktemp "${TMPDIR:-/tmp}/swiftly.XXXXXX")" || {
+    _swiftly_pkg="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/swiftly.XXXXXX")" || {
       fail "swiftly installation failed (could not create temporary package file)"
       return 1
     }
