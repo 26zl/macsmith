@@ -1221,6 +1221,11 @@ ZPROFILE_EOF
 # Split into profile-based batches so the user can opt in/out per profile.
 # Non-interactive runs use each profile's default unless MACSMITH_YES is set.
 install_sysadmin_tools() {
+  # Skip all sysadmin profiles (core-only install).
+  if _env_true "${MACSMITH_SKIP_PROFILES:-}"; then
+    echo "  ${BLUE}INFO:${NC} MACSMITH_SKIP_PROFILES=1 — skipping sysadmin profiles"
+    return 0
+  fi
   HOMEBREW_PREFIX="$(_detect_brew_prefix)"
   if [[ -z "$HOMEBREW_PREFIX" ]] || [[ ! -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
     warn "Sysadmin tools require Homebrew (skipping)"
