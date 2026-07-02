@@ -577,8 +577,9 @@ jobs:
             echo "ERROR: uninstall-nix-macos --dry-run produced no output"
             exit 1
           fi
-          if grep -qiE "deleteVolume|Deleting APFS|Deleted volume|Erasing" uninstall_nix_dry.txt; then
-            echo "ERROR: dry-run appears to have performed a destructive action"
+          # Only NON-preview lines count: dry-run prefixes every planned command with "[DRY ]".
+          if grep -iE "deleteVolume|Deleting APFS|Deleted volume|Erasing" uninstall_nix_dry.txt | grep -qvF '[DRY ]'; then
+            echo "ERROR: dry-run appears to have performed a destructive action (non-preview line)"
             exit 1
           fi
           echo "uninstall-nix-macos --dry-run previewed safely"
