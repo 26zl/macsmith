@@ -22,7 +22,7 @@ Icon\r
 *.sublime-workspace
 *.sublime-project
 
-# Claude Code
+# Local assistant files
 CLAUDE.md
 nul
 
@@ -66,8 +66,7 @@ Thumbs.db
 # GitHub Actions artifacts
 *.sarif
 
-# Snyk Security Extension — AI rules are auto-generated; keep ignored even
-# if the directories are cleaned so they don't sneak back into commits.
+# Ignore generated Snyk editor rules.
 .github/instructions/snyk_rules.instructions.md
 .cursor/rules/snyk_rules.mdc
 *instructions/

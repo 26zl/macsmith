@@ -14,7 +14,7 @@
 
 **Forge a fresh Mac into a complete dev box — and keep it sharp.**
 
-One command installs Homebrew, Starship, language toolchains, and optional sysadmin profiles. A second command (`update`) keeps everything current.
+One command installs Homebrew, Starship, language toolchains, and optional sysadmin profiles, while `update` keeps everything current.
 
 [![macOS Test](https://github.com/26zl/macsmith/actions/workflows/macos-test.yml/badge.svg)](https://github.com/26zl/macsmith/actions/workflows/macos-test.yml)
 [![Checks](https://github.com/26zl/macsmith/actions/workflows/checks.yml/badge.svg)](https://github.com/26zl/macsmith/actions/workflows/checks.yml)
@@ -31,7 +31,7 @@ Recommended — pin to a release. Grab the newest tag from
 [Releases](https://github.com/26zl/macsmith/releases/latest) and set it once:
 
 ```bash
-MACSMITH_REF=<TAG>   # e.g. v2026.06.25-1ee2ae5 — copy the latest from Releases
+MACSMITH_REF=<TAG>   # copy the latest immutable tag from Releases
 curl -fsSL "https://raw.githubusercontent.com/26zl/macsmith/${MACSMITH_REF}/bootstrap.sh" \
   | MACSMITH_REF="$MACSMITH_REF" zsh
 ```
@@ -58,6 +58,7 @@ Pick newer tags from [Releases](https://github.com/26zl/macsmith/releases).
 - macOS-only: scripts abort on non-Darwin systems.
 - Conservative automation: `NONINTERACTIVE=1` accepts each prompt's default; use `MACSMITH_YES=1` only when you explicitly want "yes" to every prompt.
 - Existing shell files are backed up before replacement, and managed writes use temp-file + rename where corruption would hurt.
+- Remote installer scripts and MacPorts source are version/digest pinned; self-upgrade also verifies GitHub build provenance.
 - Project files are not edited by `update`; it maintains global tools only and moves package-manager work to a private safe directory when launched inside a project.
 - Nix/APFS removal is guarded: the APFS volume delete always requires typing `yes`, even with `--yes`.
 - `doctor` and `verify` are read-only diagnostics.
@@ -65,11 +66,11 @@ Pick newer tags from [Releases](https://github.com/26zl/macsmith/releases).
 ## Daily use
 
 ```text
-update [target]    # upgrade everything (default) or a single target: brew/node/python/ruby/rust/swift/go/dotnet/nix/mas (try: update help)
+update [target]    # upgrade everything (default) or a single target: brew/macports/node/python/ruby/rust/swift/go/dotnet/nix/mas (try: update help)
 verify             # health-check every installed tool
 versions           # print versions on one screen
 doctor             # diagnose common setup issues (read-only)
-upgrade            # pull the latest macsmith release (SHA-256 verified against the release checksum)
+upgrade            # pull the latest release (SHA-256 + GitHub provenance verified)
 sys-install        # re-run install.sh (add/remove sysadmin profiles, pick up core updates)
 dev-tools          # re-run dev-tools.sh (add/remove language toolchains)
 uninstall-profile  # brew-uninstall a sysadmin profile's packages (power-user/crypto/netsec/devops/databases)
@@ -128,7 +129,7 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 - **Language toolchains** (via `./dev-tools.sh`, each one its own `[Y]`/`[N]` prompt):
   - Python → `~/.pyenv/`
   - Node.js → `~/.nvm/`
-  - Ruby → `~/.rubies/`, `~/.local/share/chruby/`, `~/.local/share/ruby-install/`
+  - Ruby → installed rubies in `~/.rubies/`; `chruby` + `ruby-install` are Homebrew-managed (`$HOMEBREW_PREFIX/share/chruby`, `$HOMEBREW_PREFIX/bin`)
   - Rust → `~/.rustup/`, `~/.cargo/`
   - Swift → `~/.swiftly/`
   - .NET → `/usr/local/share/dotnet/` (via brew cask; `sudo` for first install)
@@ -169,6 +170,8 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 - `NONINTERACTIVE=1` — run without prompts, accepting each prompt's default (`[Y]` => yes, `[N]` => no)
 - `MACSMITH_YES=1` — explicit unattended mode; answer "yes" to every prompt
 - `MACSMITH_FIX_RUBY_GEMS=1` — auto-fix Ruby gem permissions during `update` (on by default; set `0` to disable)
+- `MACSMITH_ALLOW_CHECKSUM_ONLY_UPGRADE=1` — ⚠️ allow `upgrade` when GitHub provenance cannot be verified (off by default)
+- `MACSMITH_ALLOW_UNSIGNED_UPGRADE=1` — ⚠️ opt `upgrade` into downloading GitHub's **unverified** zipball when a tag has no checksummed release asset (off by default; normal releases ship a verified `.sha256`)
 - `MACSMITH_CLEAN_PYENV=1` / `MACSMITH_CLEAN_NVM=1` / `MACSMITH_CLEAN_CHRUBY=1` — **opt in** to pruning old language-runtime versions during `update` (off by default, so a version another project pins via `.python-version`/`.nvmrc`/`.ruby-version` is never deleted). Pair with `MACSMITH_{PYENV,NVM,CHRUBY}_KEEP="ver1,ver2"` to keep extra versions.
 - `MACSMITH_UPDATE_WORKDIR=<dir>` — safe working directory for `update` package-manager calls
 - `MACSMITH_ALLOW_PROJECT_MODIFY=1` — explicit opt-in to run `update` from the current project directory
@@ -181,29 +184,37 @@ macsmith manages `~/.zshrc`. Put your aliases and exports in `~/.zshrc.local` �
 
 ## Ghostty terminal (optional)
 
+The optional image assets are available only in a source checkout and are
+excluded from release ZIPs until their redistribution provenance is documented
+in `ASSETS.md`.
+
 ```bash
 brew install --cask ghostty
 mkdir -p ~/.config/ghostty
 cp "Ghostty config.txt" ~/.config/ghostty/config
 cp background/terminal-background.png ~/.config/ghostty/terminal-background.png
+# Ghostty doesn't expand ~ or $HOME — point the background image at your real home:
+sed -i '' "s|/Users/CHANGE_ME|$HOME|" ~/.config/ghostty/config
 ```
 
-The bundled config auto-installs macsmith's terminfo over SSH, so `xterm-ghostty: unknown terminal type` never appears on remote hosts.
+The bundled config enables Ghostty's `ssh-terminfo` shell-integration feature, which installs Ghostty's own `xterm-ghostty` terminfo on remote hosts on first connect, so `xterm-ghostty: unknown terminal type` never appears over SSH.
 
 ## Troubleshooting
 
-**Garbled glyphs in the VS Code integrated terminal** (random characters render as the wrong bitmap — `Read` → `�ead`, broken powerline separators, mangled spinner emoji). This is the WebGL renderer's glyph-atlas getting corrupted by the Nerd Font / powerline glyphs and emoji that Starship and other tools emit — not a shell-config bug. Fix it in VS Code's `settings.json`:
+If the VS Code terminal shows corrupted glyphs, use its canvas renderer and an installed Nerd Font:
 
 ```jsonc
 "terminal.integrated.gpuAcceleration": "canvas",
 "terminal.integrated.fontFamily": "MesloLGS NF"
 ```
 
-`canvas` drops the buggy WebGL texture atlas while keeping 2D acceleration; pinning the font to an installed Nerd Font stops fallback rendering. Open a fresh terminal (or **Developer: Reload Window**) to apply. If it still corrupts, step down to `"gpuAcceleration": "off"` (pure DOM rendering, no GPU atlas at all).
+Reload VS Code after changing the settings, or use `"gpuAcceleration": "off"` if corruption remains.
 
 ## Requirements
 
-macOS 13 Ventura or later. Apple Silicon or Intel. That's it.
+macOS 13 Ventura or later, on Apple Silicon or Intel. CI runs full tests on
+macOS 14/Apple Silicon and macOS 15/Intel, with macOS 13 covered by the manual
+disposable-VM checklist.
 
 ## Uninstalling
 

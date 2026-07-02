@@ -1,27 +1,18 @@
 #!/usr/bin/env bash
-# uninstall-nix-macos.sh — safe, interactive uninstaller for Nix on macOS.
-#
-# Targets the multi-user install (launch daemons, nixbld users, /etc/nix,
-# /etc/synthetic.conf, /etc/fstab, APFS volume). Auto-detects the Determinate
-# Systems installer at /nix/nix-installer and prefers its built-in uninstaller
-# when present.
-#
-# Everything destructive is gated behind a confirmation prompt unless --yes
-# is passed. --dry-run prints every intended action and changes nothing.
-#
-# Read this script before running it. It performs sudo operations and deletes
-# system files.
+# Safely remove multi-user or Determinate Nix installs with strict confirmation for destructive steps.
 
 set -euo pipefail
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
 # --------------------------------------------------------------------------
 # Colours + logging
 # --------------------------------------------------------------------------
-readonly RED='\033[0;31m'
-readonly GREEN='\033[0;32m'
-readonly YELLOW='\033[1;33m'
-readonly BLUE='\033[0;34m'
-readonly NC='\033[0m'
+if [[ -n "${NO_COLOR:-}" ]]; then
+  readonly RED='' GREEN='' YELLOW='' BLUE='' NC=''
+else
+  readonly RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m'
+  readonly BLUE='\033[0;34m' NC='\033[0m'
+fi
 
 log_info()    { printf '%b[INFO]%b %s\n'  "$BLUE"   "$NC" "$*"; }
 log_ok()      { printf '%b[ OK ]%b %s\n'  "$GREEN"  "$NC" "$*"; }
@@ -47,8 +38,10 @@ Usage: uninstall-nix-macos.sh [--dry-run] [--yes]
 
   --dry-run   Print every intended action, change nothing.
   --yes, -y   Skip confirmation prompts (read the script first).
-              Does NOT auto-confirm the APFS volume deletion — that step
-              always requires interactive confirmation typed as 'yes'.
+              Does NOT auto-confirm the three high-risk steps — each always
+              requires interactive confirmation typed as 'yes': the APFS volume
+              deletion, the orphan /nix removal, and the Determinate Systems
+              '/nix/nix-installer uninstall' shortcut.
   -h, --help  Show this help.
 
 Removes a multi-user Nix install from macOS:
@@ -98,10 +91,11 @@ if [[ $EUID -ne 0 ]]; then
     log_info "Dry-run: not re-execing under sudo; some inspections may be limited."
   else
     log_info "Need root. Re-running under sudo..."
+    # Re-exec without preserving the caller's environment.
     if [[ ${#ORIGINAL_ARGV[@]} -gt 0 ]]; then
-      exec sudo -E bash "$0" "${ORIGINAL_ARGV[@]}"
+      exec sudo bash "$0" "${ORIGINAL_ARGV[@]}"
     else
-      exec sudo -E bash "$0"
+      exec sudo bash "$0"
     fi
   fi
 fi
@@ -110,22 +104,28 @@ fi
 # Shared state
 # --------------------------------------------------------------------------
 TS="$(date +%Y%m%d-%H%M%S)"
+ERRORS=0
 
-# Resolve the invoking user's home (under sudo, $HOME is /var/root). Use dscl
-# rather than `eval ~user` to avoid shell interpretation of SUDO_USER.
+# Resolve the invoking user's home through dscl when running under sudo.
 USER_HOME=""
 if [[ -n "${SUDO_USER:-}" ]] && [[ "${SUDO_USER}" != "root" ]]; then
   USER_HOME="$(dscl . -read "/Users/${SUDO_USER}" NFSHomeDirectory 2>/dev/null \
               | awk '/NFSHomeDirectory/ { print $2 }' || true)"
+  # Do NOT fall back to $HOME under sudo: that is root's home, and we'd "clean"
+  # /var/root/.nix-* (already handled) instead of the invoking user's state.
+  if [[ -z "$USER_HOME" ]]; then
+    log_warn "Could not resolve ${SUDO_USER}'s home via dscl; per-user ~/.nix-* cleanup will be skipped."
+  fi
+else
+  # Not under sudo: $HOME is the invoking user's own home.
+  USER_HOME="${HOME:-}"
 fi
-USER_HOME="${USER_HOME:-${HOME:-}}"
 
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
 
-# Run or simulate a command. Quotes args on display so "a b" doesn't look
-# like two arguments.
+# Run a command or display its shell-quoted dry-run form.
 run() {
   if [[ $DRY_RUN -eq 1 ]]; then
     local fmt=""
@@ -140,8 +140,7 @@ run() {
   fi
 }
 
-# Confirmation prompt. --yes skips. Dry-run prints the question but never
-# blocks. Reads from /dev/tty so it works under pipes too.
+# Confirm through /dev/tty, with --yes and dry-run shortcuts.
 confirm() {
   local prompt="${1:-Proceed?}"
   if [[ $ASSUME_YES -eq 1 ]]; then
@@ -162,10 +161,7 @@ confirm() {
   [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
-# Strict confirmation — never honours --yes. Used for irreversible destructive
-# steps where auto-confirm is actively dangerous (APFS volume deletion).
-# README promises "never deletes the APFS volume without confirmation"; this
-# function is how we keep that promise even when --yes was passed.
+# Require a typed `yes` for irreversible operations regardless of --yes.
 strict_confirm() {
   local prompt="${1:-Proceed?}"
   if [[ $DRY_RUN -eq 1 ]]; then
@@ -181,7 +177,9 @@ strict_confirm() {
   if [[ -r /dev/tty ]]; then
     IFS= read -r reply </dev/tty 2>/dev/null || return 1
   else
-    IFS= read -r reply || return 1
+    # Refuse piped input for irreversible operations.
+    log_err "No interactive terminal available; refusing irreversible operation."
+    return 1
   fi
   # Must type full "yes" — not just "y" — for irreversible ops.
   [[ "$reply" == "yes" ]]
@@ -229,13 +227,14 @@ if [[ -x /nix/nix-installer ]]; then
   log_info  "for Determinate installs and handles every step correctly."
   log_info  "Note: invoking it also deletes the APFS volume. Using strict_confirm"
   log_info  "so --yes cannot auto-trigger an irreversible system-wide uninstall."
-  # strict_confirm requires the user to type 'yes' — same bar as our own APFS
-  # deletion. This closes the bypass where --yes would auto-run Determinate's
-  # uninstaller (which then handles APFS without a second prompt from us).
+  # Require typed confirmation before invoking Determinate's destructive uninstaller.
   if strict_confirm "Use 'sudo /nix/nix-installer uninstall' and exit?"; then
-    run /nix/nix-installer uninstall
-    log_ok "Determinate uninstall finished. A restart is still recommended."
-    exit 0
+    if run /nix/nix-installer uninstall; then
+      log_ok "Determinate uninstall finished. A restart is still recommended."
+      exit 0
+    fi
+    log_err "Determinate uninstall failed"
+    exit 1
   fi
   log_warn "User chose to continue with the manual path. OK, proceeding."
 fi
@@ -277,15 +276,29 @@ for _plist in \
     /Library/LaunchDaemons/org.nixos.nix-daemon.plist \
     /Library/LaunchDaemons/org.nixos.darwin-store.plist; do
   if [[ -f "$_plist" ]]; then
+    _label="$(basename "$_plist" .plist)"
     # bootout is the modern API; unload -w is the fallback for older macOS.
-    # Both may fail harmlessly if the daemon isn't loaded — we continue.
-    run launchctl bootout system "$_plist" 2>/dev/null || true
-    run launchctl unload -w "$_plist" 2>/dev/null || true
+    # Both return non-zero for an already-unloaded daemon, which is NOT a
+    # failure — only attempt (and count) the unload when it's actually loaded.
+    if [[ $DRY_RUN -eq 1 ]] || launchctl print "system/$_label" >/dev/null 2>&1; then
+      if ! run launchctl bootout system "$_plist" 2>/dev/null \
+        && ! run launchctl unload -w "$_plist" 2>/dev/null; then
+        log_warn "Could not unload $_plist; refusing to report a clean uninstall"
+        ERRORS=$((ERRORS + 1))
+      fi
+    else
+      log_info "$_plist present but daemon not loaded; skipping unload"
+    fi
     # Not safe_rm: this is a single known file, rm -f is narrow enough.
     if [[ $DRY_RUN -eq 1 ]]; then
       log_dry "rm -f $(printf '%q' "$_plist")"
     else
-      rm -f "$_plist" && log_ok "removed: $_plist"
+      if rm -f "$_plist"; then
+        log_ok "removed: $_plist"
+      else
+        log_err "could not remove: $_plist"
+        ERRORS=$((ERRORS + 1))
+      fi
     fi
   else
     log_info "skip (not present): $_plist"
@@ -303,7 +316,10 @@ _nixbld_list="$(dscl . -list /Users 2>/dev/null \
 if [[ -n "${_nixbld_list// /}" ]]; then
   while IFS= read -r _uid; do
     [[ -z "$_uid" ]] && continue
-    run dscl . -delete "/Users/$_uid" || true
+    if ! run dscl . -delete "/Users/$_uid"; then
+      log_err "could not remove user: $_uid"
+      ERRORS=$((ERRORS + 1))
+    fi
   done <<<"$_nixbld_list"
 else
   log_info "no _nixbld* users to remove"
@@ -311,7 +327,10 @@ fi
 unset _nixbld_list _uid
 
 if dscl . -read /Groups/nixbld >/dev/null 2>&1; then
-  run dscl . -delete /Groups/nixbld || true
+  if ! run dscl . -delete /Groups/nixbld; then
+    log_err "could not remove group: nixbld"
+    ERRORS=$((ERRORS + 1))
+  fi
 else
   log_info "skip (not present): /Groups/nixbld"
 fi
@@ -320,14 +339,14 @@ fi
 # 3. Nix directories and per-user state
 # --------------------------------------------------------------------------
 log_section "3. Removing Nix config and per-user state"
-safe_rm /etc/nix
-safe_rm /var/root/.nix-profile
-safe_rm /var/root/.nix-defexpr
-safe_rm /var/root/.nix-channels
+safe_rm /etc/nix || ERRORS=$((ERRORS + 1))
+safe_rm /var/root/.nix-profile || ERRORS=$((ERRORS + 1))
+safe_rm /var/root/.nix-defexpr || ERRORS=$((ERRORS + 1))
+safe_rm /var/root/.nix-channels || ERRORS=$((ERRORS + 1))
 if [[ -n "$USER_HOME" ]]; then
-  safe_rm "$USER_HOME/.nix-profile"
-  safe_rm "$USER_HOME/.nix-defexpr"
-  safe_rm "$USER_HOME/.nix-channels"
+  safe_rm "$USER_HOME/.nix-profile" || ERRORS=$((ERRORS + 1))
+  safe_rm "$USER_HOME/.nix-defexpr" || ERRORS=$((ERRORS + 1))
+  safe_rm "$USER_HOME/.nix-channels" || ERRORS=$((ERRORS + 1))
 else
   log_info "invoking-user home unresolved — skipping per-user state"
 fi
@@ -335,10 +354,7 @@ fi
 # --------------------------------------------------------------------------
 # 4. /etc/synthetic.conf
 # --------------------------------------------------------------------------
-# Four tracker variables (read by the summary block at the end).
-# BACKUP_CREATED flips only when the backup file actually lands on disk.
-# CHANGED flips only when sed actually rewrites the file. Both stay 0 in
-# dry-run, so the summary never falsely claims a cleanup that did not run.
+# Track real backups and edits separately from dry-run output.
 SYNTHETIC_BACKUP=""
 SYNTHETIC_BACKUP_CREATED=0
 SYNTHETIC_CHANGED=0
@@ -349,23 +365,31 @@ FSTAB_CHANGED=0
 log_section "4. Cleaning /etc/synthetic.conf"
 SYNTHETIC=/etc/synthetic.conf
 if [[ -f "$SYNTHETIC" ]]; then
-  # Match the "nix" firmlink entry in either form: the bare single-field "nix"
-  # line, or the two-field "nix<TAB>/target/path" form some installers write.
-  # The required whitespace after "nix" enforces a field boundary, so
-  # "nixpkgs" / "nix2" are never touched. Uses -E (ERE) like the fstab block.
+  # Match bare or two-field nix firmlink entries with an exact field boundary.
   if grep -qE '^nix([[:space:]].*)?$' "$SYNTHETIC"; then
     SYNTHETIC_BACKUP="${SYNTHETIC}.backup-before-nix-uninstall-${TS}"
-    run cp -p "$SYNTHETIC" "$SYNTHETIC_BACKUP"
+    backup_ready=1
+    if ! run cp -p "$SYNTHETIC" "$SYNTHETIC_BACKUP"; then
+      log_err "Backup failed; refusing to modify $SYNTHETIC"
+      ERRORS=$((ERRORS + 1))
+      backup_ready=0
+    fi
     # Flag only when the backup truly exists (run is a no-op under --dry-run).
     if [[ -f "$SYNTHETIC_BACKUP" ]]; then
       SYNTHETIC_BACKUP_CREATED=1
     fi
-    if [[ $DRY_RUN -eq 1 ]]; then
+    if [[ $backup_ready -eq 0 ]]; then
+      :
+    elif [[ $DRY_RUN -eq 1 ]]; then
       log_dry "sed -i '' -E '/^nix([[:space:]].*)?\$/d' $SYNTHETIC"
     else
-      sed -i '' -E '/^nix([[:space:]].*)?$/d' "$SYNTHETIC"
-      log_ok "stripped 'nix' entry from $SYNTHETIC"
-      SYNTHETIC_CHANGED=1
+      if sed -i '' -E '/^nix([[:space:]].*)?$/d' "$SYNTHETIC"; then
+        log_ok "stripped 'nix' entry from $SYNTHETIC"
+        SYNTHETIC_CHANGED=1
+      else
+        log_err "could not modify $SYNTHETIC"
+        ERRORS=$((ERRORS + 1))
+      fi
     fi
   else
     log_info "no 'nix' entry in $SYNTHETIC"
@@ -380,27 +404,31 @@ fi
 log_section "5. Cleaning /etc/fstab"
 FSTAB=/etc/fstab
 if [[ -f "$FSTAB" ]]; then
-  # Pattern matches real fstab entries where /nix is the mountpoint field:
-  #   <non-comment-device> <ws> /nix <ws or EOL>
-  # Never matches comments (#...) or lines where /nix is part of a longer
-  # path like /nix2 or /home/nix. If nothing matches (e.g. fstab is empty
-  # or pure comments) we skip the rewrite entirely, so the file is never
-  # rewritten unnecessarily.
-  # The `/` in `/nix` is backslash-escaped so sed's default `/` pattern
-  # delimiter doesn't terminate early; grep -E is fine with the escape too.
+  # Match only active fstab entries whose mountpoint field is exactly /nix.
   _fstab_pattern='^[^#[:space:]][^[:space:]]*[[:space:]]+\/nix([[:space:]]|$)'
   if grep -qE "$_fstab_pattern" "$FSTAB"; then
     FSTAB_BACKUP="${FSTAB}.backup-before-nix-uninstall-${TS}"
-    run cp -p "$FSTAB" "$FSTAB_BACKUP"
+    backup_ready=1
+    if ! run cp -p "$FSTAB" "$FSTAB_BACKUP"; then
+      log_err "Backup failed; refusing to modify $FSTAB"
+      ERRORS=$((ERRORS + 1))
+      backup_ready=0
+    fi
     if [[ -f "$FSTAB_BACKUP" ]]; then
       FSTAB_BACKUP_CREATED=1
     fi
-    if [[ $DRY_RUN -eq 1 ]]; then
+    if [[ $backup_ready -eq 0 ]]; then
+      :
+    elif [[ $DRY_RUN -eq 1 ]]; then
       log_dry "sed -i '' -E '/$_fstab_pattern/d' $FSTAB"
     else
-      sed -i '' -E "/$_fstab_pattern/d" "$FSTAB"
-      log_ok "stripped /nix mount line(s) from $FSTAB"
-      FSTAB_CHANGED=1
+      if sed -i '' -E "/$_fstab_pattern/d" "$FSTAB"; then
+        log_ok "stripped /nix mount line(s) from $FSTAB"
+        FSTAB_CHANGED=1
+      else
+        log_err "could not modify $FSTAB"
+        ERRORS=$((ERRORS + 1))
+      fi
     fi
   else
     log_info "no /nix mount line in $FSTAB"
@@ -428,14 +456,10 @@ if diskutil info /nix >/dev/null 2>&1; then
                   | awk '{ print $1 }')"
 fi
 
-# `diskutil info /nix` reports whatever volume CONTAINS /nix. When the Nix Store
-# volume is unmounted but the /nix firmlink still exists (a common partial or
-# broken-install state), that is the ROOT/Data volume — deleting it would wipe
-# the whole system. Trust path (a) only when the volume is literally named
-# "Nix Store"; otherwise drop it and fall through to the name-anchored detectors.
+# Trust /nix volume detection only when the exact volume name is "Nix Store".
 if [[ -n "$NIX_VOLUME_ID" ]]; then
   _vname="$(diskutil info "$NIX_VOLUME_ID" 2>/dev/null \
-            | awk -F': *' '/Volume Name/ { print $2; exit }')"
+            | awk -F': *' '/Volume Name/ { print $2; exit }' || true)"
   if [[ "$_vname" != "Nix Store" ]]; then
     log_info "/nix resolves to volume '${_vname:-unknown}' (not 'Nix Store'); ignoring path match."
     NIX_VOLUME_ID=""
@@ -444,24 +468,19 @@ if [[ -n "$NIX_VOLUME_ID" ]]; then
 fi
 
 if [[ -z "$NIX_VOLUME_ID" ]]; then
-  # `diskutil apfs list` groups volumes with identifiers like "disk3s7".
-  # We track the most recent identifier line and emit it when we hit a
-  # "Name: Nix Store" row inside the same block. Anchor the name at end so
-  # "Nix Store 2" / "Nix Store Backup" never match.
+  # Match the exact Nix Store name while allowing diskutil's case-sensitivity suffix.
   NIX_VOLUME_ID="$(diskutil apfs list 2>/dev/null | awk '
     /APFS Volume Disk/ {
       for (i = 1; i <= NF; i++) {
         if ($i ~ /^disk[0-9]+s[0-9]+$/) { id = $i }
       }
     }
-    /Name:[[:space:]]+Nix Store$/ { print id; exit }
+    /Name:[[:space:]]+Nix Store([[:space:]]+\([^)]*\))?[[:space:]]*$/ { print id; exit }
   ' || true)"
 fi
 
 if [[ -z "$NIX_VOLUME_ID" ]]; then
-  # Last resort — find a candidate in `diskutil list`, then CONFIRM its exact
-  # volume name is "Nix Store" (grep -qx, whole-line match) so a decoy volume
-  # named e.g. "My Nix Store Backup" can never be selected for deletion.
+  # Confirm the exact volume name before accepting the fallback candidate.
   _cand="$(diskutil list 2>/dev/null | awk '/Nix Store/ { print $NF; exit }' || true)"
   if [[ -n "$_cand" ]] && diskutil info "$_cand" 2>/dev/null \
        | awk -F': *' '/Volume Name/ { print $2; exit }' | grep -qx 'Nix Store'; then
@@ -474,8 +493,7 @@ if [[ -z "$NIX_VOLUME_ID" ]]; then
   log_info "No Nix APFS volume found."
   if [[ -e /nix || -L /nix ]]; then
     if mount | grep -q ' on /nix '; then
-      # A live mount we could not match to a Nix Store volume — never rm -rf it
-      # (that would recursively delete the mounted store contents).
+      # Never recursively remove an unidentified live /nix mount.
       log_err "/nix is currently mounted but no Nix APFS volume was detected."
       log_err "Refusing to rm -rf a live mount. Unmount and delete it manually:"
       log_err "  diskutil unmount force /nix"
@@ -484,7 +502,7 @@ if [[ -z "$NIX_VOLUME_ID" ]]; then
       log_warn "This is usually a leftover mountpoint from a partial/old install."
       # strict_confirm so --yes can never auto-delete a system path.
       if strict_confirm "Remove orphan /nix directory/symlink?"; then
-        safe_rm /nix
+        safe_rm /nix || ERRORS=$((ERRORS + 1))
         if [[ ! -e /nix && ! -L /nix ]]; then
           ORPHAN_NIX_REMOVED=1
         fi
@@ -495,7 +513,7 @@ if [[ -z "$NIX_VOLUME_ID" ]]; then
   fi
 else
   _final_vname="$(diskutil info "$NIX_VOLUME_ID" 2>/dev/null \
-                  | awk -F': *' '/Volume Name/ { print $2; exit }')"
+                  | awk -F': *' '/Volume Name/ { print $2; exit }' || true)"
   log_warn "Found Nix APFS volume: ${NIX_VOLUME_ID} (name: '${_final_vname:-unknown}')"
   log_warn "Deleting this volume is irreversible and frees the disk space."
   # Uses strict_confirm so --yes cannot auto-delete the volume; README promises
@@ -510,6 +528,7 @@ else
       else
         log_warn "deleteVolume failed. If the volume is FileVault-locked or"
         log_warn "busy, try: diskutil unmount force /nix  (then re-run)."
+        ERRORS=$((ERRORS + 1))
       fi
     fi
   else
@@ -521,14 +540,18 @@ fi
 # --------------------------------------------------------------------------
 # Done
 # --------------------------------------------------------------------------
-log_section "Uninstall complete"
-# Summary reflects what actually happened. Claims of "cleaned" + backup are
-# gated on both CHANGED and BACKUP_CREATED being 1 so dry-run can never
-# print a path that does not exist on disk.
+if [[ $ERRORS -gt 0 ]]; then
+  log_section "Uninstall incomplete ($ERRORS error(s))"
+else
+  log_section "Uninstall complete"
+fi
+# Report cleanup only when both the edit and its backup occurred.
 printf 'Summary:\n'
-printf '  - Launch daemons:   unloaded + removed (if present)\n'
-printf '  - nixbld accounts:  removed (if present)\n'
-printf '  - Nix state:        /etc/nix + per-user .nix-* removed (if present)\n'
+if [[ $ERRORS -eq 0 ]]; then
+  printf '  - Core cleanup:     completed for all attempted operations\n'
+else
+  printf '  - Core cleanup:     incomplete; %d operation(s) failed (see above)\n' "$ERRORS"
+fi
 if [[ $SYNTHETIC_CHANGED -eq 1 && $SYNTHETIC_BACKUP_CREATED -eq 1 ]]; then
   printf '  - synthetic.conf:   cleaned, backup: %s\n' "$SYNTHETIC_BACKUP"
 else
@@ -549,3 +572,5 @@ printf 're-evaluated and /nix disappears for good:\n\n'
 printf '  sudo shutdown -r now\n\n'
 printf 'If you kept the APFS volume, it remains on disk but will not be visible\n'
 printf 'at /nix after the reboot.\n'
+
+(( ERRORS == 0 ))

@@ -3,9 +3,7 @@
 # macsmith - Standalone system and dev environment maintenance script
 # Usage: macsmith [update|verify|versions|upgrade]
 
-# Wrap entire script in a block so zsh reads the full file into memory
-# before execution. This prevents parse errors when self-upgrade replaces
-# this file while it's running.
+# Read the complete script before execution so self-upgrade can replace the file safely.
 {
 
 # Colors for output (honor the NO_COLOR convention — https://no-color.org)
@@ -66,6 +64,11 @@ _detect_brew_prefix() {
   fi
 }
 
+# Enforce HTTPS, TLS 1.2, and HTTP failure handling for remote fetches.
+_curl_safe() {
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail "$@"
+}
+
 _ensure_system_path() {
   local required_paths=(/usr/bin /bin /usr/sbin /sbin)
   local path_entry=""
@@ -88,10 +91,7 @@ _is_disabled() {
   return 1
 }
 
-# Opt-in check: true only when explicitly turned on. Used by the destructive
-# runtime-version cleanup (pyenv/nvm/chruby) so an unset value means "don't
-# delete" — deleting a version another project pins via .python-version /
-# .nvmrc / .ruby-version must never be the default.
+# Require explicit true values before destructive runtime-version cleanup.
 _is_enabled() {
   local value="${1:-}"
   case "${value:l}" in
@@ -140,9 +140,7 @@ _is_project_directory() {
     return 1  # Not a project directory
   fi
 
-  # Walk up from $PWD checking every ancestor for project markers — running
-  # `update` from repo/src must still detect the repo root's .git/go.mod/etc.
-  # Stop at $HOME (its dotfiles repo / loose markers don't count) and at /.
+  # Walk ancestors for project markers without treating HOME as a project root.
   local dir="$current_dir"
   while [[ -n "$dir" && "$dir" != "/" && "$dir" != "$home_dir" ]]; do
     if _project_file_marker_in_dir "$dir" >/dev/null 2>&1; then
@@ -152,6 +150,20 @@ _is_project_directory() {
   done
 
   return 1  # Not a project directory
+}
+
+# Return the highest marked project ancestor below HOME.
+_find_project_root() {
+  local dir="${1:-${PWD:-$(pwd)}}"
+  local home_dir="${HOME:-}"
+  local root=""
+  while [[ -n "$dir" && "$dir" != "/" && "$dir" != "$home_dir" ]]; do
+    if _project_file_marker_in_dir "$dir" >/dev/null 2>&1; then
+      root="$dir"  # keep walking — the outermost marker-bearing dir wins
+    fi
+    dir="${dir:h}"  # zsh: parent directory
+  done
+  echo "$root"
 }
 
 # Check if Python is system Python (should not be modified)
@@ -253,28 +265,21 @@ _fix_all_ruby_gems() {
   echo "  Checking ${#installed_gems[@]} installed gems..."
   
   local fixed_count=0
+  local failed_count=0
   local problematic_gems=()
   local working_gems=0
   
   
   # Check each gem for issues
   for gem in "${installed_gems[@]}"; do
-    # Skip default gems that can't be uninstalled. Match the exact
-    # "default: X.Y.Z" annotation in `gem list <gem>` output instead of a
-    # bare "default" substring — the latter would also match gem descriptions
-    # if `--details` were ever added, and produces false-positives for gems
-    # that happen to contain the word.
+    # Match Ruby's exact default-gem annotation before skipping uninstall checks.
     if gem list "$gem" 2>/dev/null | grep -qE '\(default:'; then
       ((working_gems++))
       continue
     fi
     
     # Check if gem executable exists and works.
-    # Use the gemspec's `executables` field (the authoritative list of CLI
-    # commands the gem ships) instead of grepping `gem contents` for `bin/` —
-    # the latter matches `bin/console` and `bin/setup` from the `bundle gem`
-    # template, which are dev scaffolding, not real executables. That made us
-    # reinstall pure-library gems (abbrev, nkf, syslog, ...) on every update.
+    # Read executable names from the gemspec rather than development scaffolding paths.
     local gem_executable=""
     gem_executable="$(ruby -rrubygems -e \
       'spec = (Gem::Specification.find_by_name(ARGV[0]) rescue exit); puts(spec.executables.first || "")' \
@@ -320,16 +325,14 @@ _fix_all_ruby_gems() {
       
       echo "  FIXING: $gem..."
       
-      # Reinstall in place with --force (overwrites/repairs even when present)
-      # so the gem is never absent mid-operation. Uninstalling first and then
-      # failing the reinstall (network/build error) would permanently delete a
-      # working gem — and this runs by default on every `update`.
-      if gem install "$gem" --force --no-user-install --no-document 2>/dev/null; then
+      # Reinstall in place so a failed repair does not first remove the gem.
+      if _timeout 180 gem install "$gem" --force --no-user-install --no-document 2>/dev/null; then
         ((fixed_count++))
         echo "    SUCCESS: Fixed $gem"
         gem cleanup "$gem" 2>/dev/null || true
       else
         echo "    ${RED}WARNING:${NC} Failed to fix $gem (left untouched)"
+        ((failed_count++))
       fi
     fi
   done
@@ -345,7 +348,10 @@ _fix_all_ruby_gems() {
     else
       # Gemfile in home directory or other non-project location - OK to update (global gems)
       echo "  BUNDLE: Reinstalling gems from Gemfile (global installation)..."
-      bundle install 2>/dev/null || echo "    ${RED}WARNING:${NC} Bundle install failed"
+      if ! _timeout 180 bundle install 2>/dev/null; then
+        echo "    ${RED}WARNING:${NC} Bundle install failed"
+        ((failed_count++))
+      fi
     fi
   fi
   
@@ -361,53 +367,101 @@ _fix_all_ruby_gems() {
   
   # Refresh command hash table after gem changes
   hash -r 2>/dev/null || true
+  (( failed_count == 0 ))
 }
 
 # ================================ PYTHON COMPATIBILITY =====================
 
-_check_python_package_compatibility() {
-  local current_python="$1"
-  local target_python="$2"
-  local package_name="$3"
-  
-  # Check if package has Python version requirements
-  local requirements=""
-  if command -v pip >/dev/null 2>&1; then
-    requirements="$(pip show "$package_name" 2>/dev/null | grep -i "requires-python" | cut -d: -f2 | tr -d ' ' || true)"
+_conda_update_base() {
+  # Update the base environment and report failures through zsh dynamic scope.
+  local conda_errors=()
+
+  local conda_update_output=""
+  local conda_update_exit_code=0
+  if conda info | grep -qi "channel.*defaults"; then
+    conda_update_output="$(conda update -n base -c defaults conda -y 2>&1)" || conda_update_exit_code=$?
+  else
+    conda_update_output="$(conda update -n base conda -y 2>&1)" || conda_update_exit_code=$?
   fi
-  
-  if [[ -n "$requirements" ]]; then
-    # Only an actual UPPER bound (<X.Y) or exclusion (!=X.Y) can make a NEWER
-    # Python incompatible. A pure lower bound like ">=3.8" is satisfied by any
-    # newer Python, so do NOT treat a lone ">" as incompatible — that flagged
-    # nearly every package and silently blocked the pyenv auto-upgrade.
-    if [[ "$requirements" == *"<"* ]] || [[ "$requirements" == *"!="* ]]; then
-      echo "  ${RED}WARNING:${NC} $package_name has an upper-bound Python requirement: $requirements"
-      return 1
+  if [[ $conda_update_exit_code -eq 0 ]]; then
+    if echo "$conda_update_output" | grep -qiE "(downloading|installing|updating|changed|upgraded)"; then
+      echo "  conda updated successfully"
+    elif echo "$conda_update_output" | grep -qiE "(already|up to date|All requested packages already installed)"; then
+      echo "  ${BLUE}INFO:${NC} conda is already up to date"
+    else
+      echo "  ${BLUE}INFO:${NC} conda checked (may already be up to date)"
     fi
+  else
+    conda_errors+=("conda_update")
+    echo "  ${RED}WARNING:${NC} conda update failed (exit code: $conda_update_exit_code)"
   fi
-  
-  return 0
+
+  local conda_packages_output=""
+  local conda_packages_exit_code=0
+  conda_packages_output="$(conda update --all -y 2>&1)" || conda_packages_exit_code=$?
+  if [[ $conda_packages_exit_code -eq 0 ]]; then
+    if echo "$conda_packages_output" | grep -qiE "(downloading|installing|updating|changed|upgraded|will be)"; then
+      echo "  conda packages updated successfully"
+    elif echo "$conda_packages_output" | grep -qiE "(already|up to date|All requested packages already installed)"; then
+      echo "  ${BLUE}INFO:${NC} conda packages are already up to date"
+    else
+      echo "  ${BLUE}INFO:${NC} conda packages checked (may already be up to date)"
+    fi
+  else
+    conda_errors+=("conda_packages")
+    echo "  ${RED}WARNING:${NC} Some conda packages failed to update (exit code: $conda_packages_exit_code)"
+  fi
+
+  conda clean --all -y 2>/dev/null || conda_errors+=("conda_clean")
+
+  if [[ ${#conda_errors[@]} -gt 0 ]]; then
+    echo "  conda issues: ${conda_errors[*]}"
+    _update_failed=1
+  fi
+}
+
+_nix_profile_count() {
+  # Count Nix package headers with a fallback for one-line profile output.
+  local out
+  out="$(nix profile list 2>/dev/null)" || { echo 0; return 0; }
+  [[ -z "$out" ]] && { echo 0; return 0; }
+  local n
+  n="$(printf '%s\n' "$out" | grep -cE '^[[:space:]]*Name:')"
+  if [[ "$n" -gt 0 ]]; then
+    echo "$n"
+  else
+    printf '%s\n' "$out" | grep -c .
+  fi
 }
 
 _check_python_upgrade_compatibility() {
-  local current_python="$1"
-  local target_python="$2"
-  
+
   echo "${GREEN}[Python]${NC} Checking package compatibility before upgrade..."
   local incompatible_packages=()
   
-  # Check regular pip packages
-  if command -v pip >/dev/null 2>&1; then
-    local installed_packages="$(pip list --format=freeze 2>/dev/null | cut -d= -f1 || true)"
-    if [[ -n "$installed_packages" ]]; then
-      echo "  Checking pip packages..."
-      while IFS= read -r package; do
-        [[ -z "$package" ]] && continue
-        if ! _check_python_package_compatibility "$current_python" "$target_python" "$package"; then
-          incompatible_packages+=("$package")
-        fi
-      done <<< "$installed_packages"
+  # Check explicit Requires-Python upper bounds and exclusions in one metadata pass.
+  if command -v python3 >/dev/null 2>&1; then
+    echo "  Checking pip packages..."
+    local _py_incompat=""
+    _py_incompat="$(python3 - <<'PY' 2>/dev/null || true
+try:
+    from importlib.metadata import distributions
+except Exception:
+    raise SystemExit(0)
+for dist in distributions():
+    rp = (dist.metadata.get("Requires-Python") or "")
+    if "<" in rp or "!=" in rp:
+        name = dist.metadata.get("Name") or ""
+        if name:
+            print(name + "\t" + rp)
+PY
+)"
+    if [[ -n "$_py_incompat" ]]; then
+      while IFS=$'\t' read -r _pkg _req; do
+        [[ -z "$_pkg" ]] && continue
+        echo "  ${RED}WARNING:${NC} $_pkg has an upper-bound Python requirement: $_req"
+        incompatible_packages+=("$_pkg")
+      done <<< "$_py_incompat"
     fi
   fi
   
@@ -438,48 +492,57 @@ _check_python_upgrade_compatibility() {
 
 # ================================ GO HELPERS =============================
 
-# Setup permanent Go configuration in .zprofile
-_setup_go_permanent() {
-  local goroot="$1"
-  [[ -z "$goroot" || ! -d "$goroot" ]] && return 1
-  
+# Remove the legacy version-locked Homebrew Go block from .zprofile.
+_remove_go_permanent() {
   local zprofile="$HOME/.zprofile"
   local marker="# Managed by macsmith - Go configuration"
-  local go_config_block="export GOROOT=\"$goroot\"
-export PATH=\"\$GOROOT/bin:\$PATH\""
+  [[ -f "$zprofile" ]] || return 0
+  grep -q "$marker" "$zprofile" 2>/dev/null || return 0
 
-  # Check if Go config already exists
-  if [[ -f "$zprofile" ]] && grep -q "$marker" "$zprofile" 2>/dev/null; then
-    # Update existing Go config - use sed to replace the GOROOT line
-    local temp_file=$(mktemp)
-    local in_go_block=false
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      if [[ "$line" == *"$marker"* ]]; then
-        in_go_block=true
-        echo "$line"
-        echo "$go_config_block"
+  local backup="${zprofile}.backup-$(date +%Y%m%d%H%M%S)"
+  if ! cp -p "$zprofile" "$backup"; then
+    echo "  ${RED}ERROR:${NC} could not back up $zprofile; refusing to modify it" >&2
+    return 1
+  fi
+
+  local temp_file old_umask mode
+  old_umask="$(umask)"
+  umask 077
+  if ! temp_file="$(mktemp "${zprofile}.macsmith.XXXXXX")"; then
+    umask "$old_umask"
+    return 1
+  fi
+  umask "$old_umask"
+  mode="$(stat -f '%Lp' "$zprofile" 2>/dev/null || true)"
+  local in_go_block=false
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == *"$marker"* ]]; then
+      in_go_block=true
+      continue
+    fi
+    if [[ "$in_go_block" == true ]]; then
+      # Skip old Go config lines (export GOROOT or export PATH with GOROOT) and
+      # blank lines within the block, so a blank line can't end it prematurely.
+      if [[ -z "${line//[[:space:]]/}" ]] \
+        || [[ "$line" =~ ^[[:space:]]*export[[:space:]]+GOROOT ]] \
+        || [[ "$line" =~ ^[[:space:]]*export[[:space:]]+PATH.*GOROOT ]]; then
         continue
       fi
-      if [[ "$in_go_block" == true ]]; then
-        # Skip old Go config lines (export GOROOT or export PATH with GOROOT)
-        if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+GOROOT ]] || [[ "$line" =~ ^[[:space:]]*export[[:space:]]+PATH.*GOROOT ]]; then
-          continue
-        fi
-        # Hit end of Go block, stop skipping
-        in_go_block=false
-      fi
-      echo "$line"
-    done < "$zprofile" > "$temp_file"
-    mv "$temp_file" "$zprofile"
-  else
-    # Append new Go config
-    {
-      echo ""
-      echo "$marker"
-      echo "$go_config_block"
-    } >> "$zprofile"
+      # Hit end of Go block, stop skipping
+      in_go_block=false
+    fi
+    echo "$line"
+  done < "$zprofile" > "$temp_file"
+  if [[ -n "$mode" ]] && ! chmod "$mode" "$temp_file"; then
+    rm -f "$temp_file"
+    return 1
   fi
-  
+  if ! mv -f "$temp_file" "$zprofile"; then
+    rm -f "$temp_file"
+    return 1
+  fi
+  _rotate_backups "$zprofile"
+
   return 0
 }
 
@@ -517,165 +580,19 @@ _pyenv_latest_installed() {
 
 _pyenv_activate_latest() {
   local PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
-  local HOMEBREW_PREFIX="$(_detect_brew_prefix)"
-  
+
   command -v pyenv >/dev/null 2>&1 || return 1
   local target="${1:-$(_pyenv_latest_available)}"
   [[ -n "$target" ]] || return 1
-  
-  # Check if version is already installed (multiple methods for robustness)
-  local is_installed=false
-  
-  # Method 1: Check via pyenv versions command
-  if pyenv versions --bare 2>/dev/null | grep -qE "^[[:space:]]*${target}[[:space:]]*$"; then
-    is_installed=true
+
+  if ! pyenv versions --bare 2>/dev/null | sed 's/^[[:space:]]*//' | grep -qx "$target"; then
+    echo "  Installing exact Python $target via pyenv..." >&2
+    pyenv install "$target" || return 1
   fi
-  
-  # Method 2: Check if version directory exists (more reliable)
-  if [[ -d "$PYENV_ROOT/versions/$target" ]]; then
-    is_installed=true
-  fi
-  
-  if [[ "$is_installed" == false ]]; then
-    # Try to install via Homebrew first (much faster - uses pre-built binaries)
-    local major_version=$(echo "$target" | cut -d. -f1)
-    local minor_version=$(echo "$target" | cut -d. -f2)
-    local brew_python_formula=""
-    local brew_installed=false
-    
-    # Check if Homebrew is available
-    if [[ -n "$HOMEBREW_PREFIX" ]] && command -v brew >/dev/null 2>&1; then
-      # Try different Homebrew Python formula names (most specific first)
-      for formula in "python@${major_version}.${minor_version}" "python@${major_version}" "python"; do
-        # Check if formula exists and is installable
-        if brew info "$formula" >/dev/null 2>&1 && ! brew info "$formula" 2>/dev/null | grep -q "Not installed"; then
-          brew_python_formula="$formula"
-          # Check if it's already installed
-          if brew list "$formula" >/dev/null 2>&1; then
-            brew_installed=true
-          fi
-          break
-        elif brew list "$formula" >/dev/null 2>&1; then
-          # Formula is installed even if info check failed
-          brew_python_formula="$formula"
-          brew_installed=true
-          break
-        fi
-      done
-      
-      if [[ -n "$brew_python_formula" ]]; then
-        if [[ "$brew_installed" == false ]]; then
-          echo "  Installing Python $target via Homebrew (fast - pre-built binaries)..." >&2
-          if brew install "$brew_python_formula" 2>/dev/null; then
-            brew_installed=true
-          else
-            echo "  ${RED}WARNING:${NC} Homebrew installation failed, will try pyenv install instead" >&2
-            brew_installed=false
-          fi
-        else
-          echo "  Found existing Homebrew Python installation: $brew_python_formula" >&2
-        fi
-        
-        if [[ "$brew_installed" == true ]] || brew list "$brew_python_formula" >/dev/null 2>&1; then
-          # Link Homebrew Python to pyenv (with safety checks)
-          local brew_python_path=""
-          
-          # Try multiple paths to find Homebrew Python
-          if [[ -d "$HOMEBREW_PREFIX/opt/$brew_python_formula/bin" ]]; then
-            brew_python_path="$HOMEBREW_PREFIX/opt/$brew_python_formula"
-          elif [[ -L "$HOMEBREW_PREFIX/opt/$brew_python_formula" ]]; then
-            # Follow symlink if opt is a symlink (macOS readlink doesn't support -f, use cd -P instead)
-            brew_python_path=$(cd -P "$HOMEBREW_PREFIX/opt/$brew_python_formula" 2>/dev/null && pwd || echo "")
-            [[ -z "$brew_python_path" ]] && brew_python_path="$HOMEBREW_PREFIX/opt/$brew_python_formula"
-          elif [[ -d "$HOMEBREW_PREFIX/Cellar/$brew_python_formula" ]]; then
-            # Find the latest version in Cellar
-            brew_python_path=$(ls -td "$HOMEBREW_PREFIX/Cellar/$brew_python_formula"/*/bin 2>/dev/null | head -1 | sed 's|/bin$||')
-          fi
-          
-          # Verify python3 exists 
-          if [[ -n "$brew_python_path" && -e "$brew_python_path/bin/python3" ]]; then
-            # Verify the version matches 
-            local brew_version=$("$brew_python_path/bin/python3" --version 2>/dev/null | cut -d' ' -f2 || echo "")
-            if [[ -n "$brew_version" ]]; then
-              # Extract major.minor from both versions for comparison
-              local target_major_minor="${target%.*}"
-              local brew_major_minor="${brew_version%.*}"
-              
-              # Accept if major.minor matches (e.g., 3.14.x matches 3.14.2)
-              if [[ "$brew_major_minor" == "$target_major_minor" ]]; then
-                local symlink_path="$PYENV_ROOT/versions/$target"
-                if [[ -L "$symlink_path" ]]; then
-                  # Check if symlink is broken
-                  if [[ ! -e "$symlink_path" ]]; then
-                    echo "  ${RED}WARNING:${NC} Broken symlink detected, removing..." >&2
-                    rm -f "$symlink_path" 2>/dev/null || true
-                  elif [[ "$(readlink "$symlink_path")" != "$brew_python_path" ]]; then
-                    # Symlink points to wrong location, update it
-                    echo "  Updating symlink to point to current Homebrew Python ($brew_version)..." >&2
-                    rm -f "$symlink_path" 2>/dev/null || true
-                    mkdir -p "$PYENV_ROOT/versions" 2>/dev/null || true
-                    ln -sf "$brew_python_path" "$symlink_path" 2>/dev/null || true
-                  else
-                    # Symlink is valid and points to correct location
-                    is_installed=true
-                  fi
-                else
-                  # Create new symlink
-                  echo "  Linking Homebrew Python $brew_version as pyenv $target..." >&2
-                  mkdir -p "$PYENV_ROOT/versions" 2>/dev/null || true
-                  ln -sf "$brew_python_path" "$symlink_path" 2>/dev/null || true
-                fi
-                
-                if [[ "$is_installed" == false ]]; then
-                  # Verify symlink was created successfully
-                  if [[ -L "$symlink_path" && -e "$symlink_path" ]]; then
-                    pyenv rehash 2>/dev/null || true
-                    is_installed=true
-                    echo "  SUCCESS: Using Homebrew Python $brew_version (close match to $target)" >&2
-                  fi
-                else
-                  pyenv rehash 2>/dev/null || true
-                fi
-              else
-                echo "  ${BLUE}INFO:${NC} Homebrew Python version $brew_version doesn't match $target (need $target_major_minor.x)" >&2
-              fi
-            fi
-          fi
-        fi
-      fi
-    fi
-    
-    # If Homebrew installation didn't work, fall back to pyenv install (slower - compiles from source)
-    if [[ "$is_installed" == false ]]; then
-      echo "  Installing Python $target via pyenv (this may take several minutes - compiling from source)..." >&2
-      pyenv install "$target" || return 1
-      pyenv rehash 2>/dev/null || true
-    fi
-  fi
-  
-  # Activate the version
+
   pyenv global "$target" || return 1
   pyenv rehash >/dev/null 2>&1 || true
-  
-  # Ensure 'python' symlink exists in pyenv version (needed for pipx and other tools)
-  local pyenv_bin_dir="$PYENV_ROOT/versions/$target/bin"
-  if [[ -d "$pyenv_bin_dir" ]]; then
-    # If python doesn't exist but python3 does, create a symlink
-    if [[ ! -f "$pyenv_bin_dir/python" ]] && [[ -f "$pyenv_bin_dir/python3" ]]; then
-      # For symlinked Homebrew Python, we need to create python symlink pointing to python3
-      if [[ -L "$pyenv_bin_dir" ]] || [[ -L "$PYENV_ROOT/versions/$target" ]]; then
-        # Follow symlink to find actual bin directory
-        local actual_bin_dir=$(cd -P "$pyenv_bin_dir" 2>/dev/null && pwd)
-        if [[ -n "$actual_bin_dir" && -f "$actual_bin_dir/python3" && ! -f "$actual_bin_dir/python" ]]; then
-          ln -sf python3 "$actual_bin_dir/python" 2>/dev/null || true
-        fi
-      else
-        # Regular pyenv installation
-        ln -sf python3 "$pyenv_bin_dir/python" 2>/dev/null || true
-      fi
-    fi
-  fi
-  
+
   printf "%s" "$target"
 }
 
@@ -701,8 +618,7 @@ _chruby_latest_available() {
   # Fetch latest available (slow operation)
   local latest=""
   if command -v ruby-install >/dev/null 2>&1; then
-    # ruby-install --list prints 4-space-indented bare versions (e.g. "    3.4.2")
-    # under a "  ruby:" header — NOT "ruby X.Y.Z". Match indented bare versions.
+    # Parse indented versions from ruby-install's Ruby section.
     latest="$(ruby-install --list ruby 2>/dev/null | awk '/^[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+$/ {print $1}' | sort -V | tail -n1)"
   fi
   
@@ -728,9 +644,7 @@ _chruby_install_latest() {
   if ! chruby 2>/dev/null | sed -E 's/^[* ]+//' | grep -qx "ruby-$latest"; then
     ruby-install ruby "$latest" || return 1
   fi
-  # Activate and verify it actually took effect. chruby builds its RUBIES list
-  # once at source time, so a ruby just created by ruby-install may not be in
-  # the in-process list yet; swallowing the error would report a false success.
+  # Verify activation because chruby may not discover a newly installed Ruby in-process.
   chruby "ruby-$latest" 2>/dev/null || true
   if [[ "${RUBY_ROOT##*/}" != "ruby-$latest" ]]; then
     return 1
@@ -751,8 +665,7 @@ _go_update_toolchain() {
   
   local go_errors=()
 
-  # Note: go clean -modcache removed - it deletes the entire module download cache
-  # which forces all Go projects to re-download dependencies. Too aggressive for routine updates.
+  # Preserve the Go module cache during routine updates.
   
   # Update Go itself - Homebrew only (no auto-install via go tool)
   local brew_go=false
@@ -767,14 +680,8 @@ _go_update_toolchain() {
       # Check if version actually changed
       if [[ "$new_version" != "$old_version" ]]; then
         go_updated=true
-        # Get GOROOT from updated Go
-        local new_goroot=$(go env GOROOT 2>/dev/null || echo "")
-        if [[ -n "$new_goroot" && -d "$new_goroot" ]]; then
-          # Make it permanent
-          _setup_go_permanent "$new_goroot"
-        fi
         current_version="$new_version"
-        echo "  SUCCESS: Updated to Go $new_version (permanent configuration added to .zprofile)"
+        echo "  SUCCESS: Updated to Go $new_version"
       else
         echo "  ${BLUE}INFO:${NC} Go is already up to date ($current_version)"
       fi
@@ -791,7 +698,7 @@ _go_update_toolchain() {
   local latest_version=""
   if command -v curl >/dev/null 2>&1; then
     local json_response=""
-    json_response="$(curl -s --connect-timeout 15 --max-time 30 --retry 3 'https://go.dev/dl/?mode=json' 2>/dev/null || echo "")"
+    json_response="$(_curl_safe -s --connect-timeout 15 --max-time 30 --retry 3 'https://go.dev/dl/?mode=json' 2>/dev/null || echo "")"
     if [[ -n "$json_response" && "$json_response" != "FAILED" ]]; then
       # Parse JSON to find latest stable version
       # The JSON format is: [{"version":"go1.24.5","stable":true,...},...]
@@ -823,6 +730,8 @@ _go_update_toolchain() {
   fi
 
   if [[ "$brew_go" == "true" ]]; then
+    # Remove any legacy version-locked GOROOT block on every update.
+    _remove_go_permanent
     if [[ "$go_updated" == "true" ]]; then
       if [[ "$go_update_available" == "true" && -n "$latest_version" && "$latest_version" != "$current_version" ]]; then
         echo "  ${BLUE}INFO:${NC} Homebrew updated Go to $current_version; upstream $latest_version is available (manual install or wait for Homebrew)"
@@ -853,9 +762,7 @@ _go_update_toolchain() {
   # Update all globally installed Go tools
   echo "  Checking for globally installed Go tools..."
   
-  # Find Go binary directories. The -U (keep-unique) array auto-dedups, so the
-  # default layout where $GOPATH/bin and $HOME/go/bin are the same path collapses
-  # to one entry — otherwise the scan loop below processes every tool twice.
+  # Use a unique array so identical Go binary directories are scanned once.
   local -aU go_bin_dirs
   local gobin=$(go env GOBIN 2>/dev/null || echo "")
   local gopath=$(go env GOPATH 2>/dev/null || echo "")
@@ -918,15 +825,15 @@ _go_update_toolchain() {
           local updated=false
 
           # Try 1: Direct module path (if it's already a command path)
-          if go install "${mod_path}@latest" 2>/dev/null; then
+          if _timeout 300 go install "${mod_path}@latest" 2>/dev/null; then
             updated=true
           else
             # Try 2: Module path + /cmd/toolname
-            if go install "${mod_path}/cmd/${tool_name}@latest" 2>/dev/null; then
+            if _timeout 300 go install "${mod_path}/cmd/${tool_name}@latest" 2>/dev/null; then
               updated=true
             else
               # Try 3: Module path + /toolname
-              if go install "${mod_path}/${tool_name}@latest" 2>/dev/null; then
+              if _timeout 300 go install "${mod_path}/${tool_name}@latest" 2>/dev/null; then
                 updated=true
               fi
             fi
@@ -996,15 +903,12 @@ _cargo_update_packages() {
 
   echo "  Found $total globally installed packages"
 
-  # Update each package. `cargo install <pkg>` exits 0 AND prints "Ignored ...
-  # already installed" (to STDERR) for an up-to-date package, so trusting the
-  # exit code alone reports every package as "Updated". Capture output (2>&1)
-  # and classify: already-installed = skipped, real install/replace = updated.
+  # Classify Cargo output because unchanged packages also exit successfully.
   local _cargo_out
   while IFS= read -r package; do
     [[ -z "$package" ]] && continue
     echo "  Upgrading $package..."
-    if _cargo_out="$(cargo install "$package" 2>&1)"; then
+    if _cargo_out="$(_timeout 300 cargo install "$package" 2>&1)"; then
       if echo "$_cargo_out" | grep -qiE 'already installed|^[[:space:]]*Ignored '; then
         ((skipped++))
       else
@@ -1028,11 +932,7 @@ _cargo_update_packages() {
 # ================================ UPDATE ===================================
 
 _update_impl() {
-  # Targeted update dispatch. `update` or `update all` runs the full monolith
-  # below. Specific targets run a minimal "just this tool" path so users can
-  # iterate quickly instead of waiting 5+ min for a full pass. For complex
-  # targets the minimal path does what's useful without re-implementing the
-  # full cleanup/detect logic — use `update` (no arg) when you want the works.
+  # Route named targets to minimal updates and `all` to the full update path.
   local _target="${1:-all}"
   case "$_target" in
     all) ;;
@@ -1047,6 +947,12 @@ _update_impl() {
     macports)
       if ! command -v port >/dev/null 2>&1; then
         echo "${RED}[MacPorts]${NC} not installed"; return 1
+      fi
+      # Mirror the full-update path: MacPorts needs sudo, so skip in CI/non-
+      # interactive mode instead of prompting (or failing on a missing tty).
+      if _is_enabled "${CI:-}" || _is_enabled "${NONINTERACTIVE:-}"; then
+        echo "${GREEN}[MacPorts]${NC} Skipped in CI/non-interactive mode (requires sudo)"
+        return 0
       fi
       echo "${GREEN}[MacPorts]${NC} selfupdate + upgrade outdated (sudo required)"
       sudo port selfupdate && sudo port upgrade outdated
@@ -1079,9 +985,7 @@ _update_impl() {
       fi
       if command -v conda >/dev/null 2>&1; then
         echo "${GREEN}[conda]${NC} update"
-        # Only force -c defaults on Anaconda; Miniforge (the conda we install by
-        # default) has no 'defaults' channel/ToS and would error. Mirror the
-        # detection the full-update path already uses.
+      # Use the defaults channel only when the active Conda installation provides it.
         if conda info | grep -qi "channel.*defaults"; then
           conda update -n base -c defaults conda -y || _py_rc=$?
         else
@@ -1144,9 +1048,16 @@ _update_impl() {
         echo "${RED}[Nix]${NC} not installed"; return 1
       fi
       echo "${GREEN}[Nix]${NC} profile upgrade + gc"
-      nix profile upgrade '.*' 2>/dev/null || nix-env -u '*' 2>/dev/null || true
-      nix-collect-garbage 2>/dev/null || sudo nix-collect-garbage 2>/dev/null || true
-      return 0
+      local nix_rc=0
+      if ! nix profile upgrade '.*' 2>/dev/null && ! nix-env -u '*' 2>/dev/null; then
+        echo "${RED}[Nix]${NC} package upgrade failed" >&2
+        nix_rc=1
+      fi
+      if ! nix-collect-garbage 2>/dev/null && ! sudo -n nix-collect-garbage 2>/dev/null; then
+        echo "${RED}[Nix]${NC} garbage collection failed" >&2
+        nix_rc=1
+      fi
+      return $nix_rc
       ;;
     mas)
       if ! command -v mas >/dev/null 2>&1; then
@@ -1298,9 +1209,7 @@ EOF
       if echo "$brew_upgrade_formula_output" | grep -qiE "(Already up-to-date|Nothing to upgrade|All formulae are up to date|No outdated packages|0 outdated packages)"; then
         echo "  ${BLUE}INFO:${NC} Homebrew formulae are already up to date"
       else
-        # Extract what was upgraded. Brew prints both a "==> Upgrading N
-        # outdated packages:" header and per-package "==> Upgrading <name>"
-        # lines — drop the header so the count and list reflect packages only.
+        # Count per-package Homebrew upgrade lines without the summary header.
         local upgraded_list=""
         upgraded_list="$(echo "$brew_upgrade_formula_output" | grep -E '^==> Upgrading ' | grep -vE '^==> Upgrading [0-9]+ outdated packages?:[[:space:]]*$' | sed -E 's/^==> Upgrading //' || true)"
         if [[ -n "$upgraded_list" ]]; then
@@ -1372,10 +1281,7 @@ EOF
     brew cleanup 2>/dev/null || brew_errors+=("cleanup")
     brew cleanup -s 2>/dev/null || true
     
-    # brew doctor exits non-zero for benign/informational findings on a healthy
-    # system (deprecated formulae, unbrewed headers, ...). Surface its output so
-    # the user sees WHY, but do NOT add it to brew_errors / fail `update` — a
-    # cosmetic doctor note must not flip the whole run's exit code.
+    # Show brew doctor findings without treating informational output as an update failure.
     local _doctor_out
     if _doctor_out="$(brew doctor 2>&1)"; then
       echo "  Homebrew doctor check passed"
@@ -1400,7 +1306,7 @@ EOF
   
   if command -v port >/dev/null 2>&1; then
     # Skip MacPorts in CI/CD environments (requires sudo)
-    if [[ -n "${CI:-}" ]] || [[ -n "${NONINTERACTIVE:-}" ]]; then
+    if _is_enabled "${CI:-}" || _is_enabled "${NONINTERACTIVE:-}"; then
       echo "${GREEN}[MacPorts]${NC} Skipped in CI/non-interactive mode (requires sudo)"
       # Continue with rest of update function, just skip MacPorts block
     else
@@ -1497,11 +1403,7 @@ EOF
         fi
       fi
       
-      # Always ask _pyenv_latest_available — it has its own 24h mtime cache, so
-      # this is cheap when fresh and re-queries only when stale. The old
-      # short-circuit (cached == installed -> reuse installed) meant an
-      # already-up-to-date user never refreshed the cache and therefore never
-      # discovered a genuinely new upstream Python release.
+      # Query the cached latest Python helper so stale data refreshes on schedule.
       latest_available="$(_pyenv_latest_available)"
     else
       # No installed versions - check what's available (may be slow, but cached)
@@ -1519,7 +1421,7 @@ EOF
         echo ""
         # Skip prompt in non-interactive mode
         local should_upgrade=false
-        if [[ -n "${NONINTERACTIVE:-}" ]] || [[ -n "${CI:-}" ]]; then
+        if _is_enabled "${NONINTERACTIVE:-}" || _is_enabled "${CI:-}"; then
           echo "  ${BLUE}INFO:${NC} Non-interactive mode: skipping Python upgrade (incompatible packages detected)"
           should_upgrade=false
         else
@@ -1768,61 +1670,7 @@ EOF
     # Update miniforge/conda packages
     if command -v conda >/dev/null 2>&1; then
       echo "${GREEN}[conda/miniforge]${NC} Updating conda and packages..."
-      local conda_errors=()
-      
-      # Update conda itself first
-      local conda_update_output=""
-      local conda_update_exit_code=0
-
-      # Try updating conda (use defaults channel for Anaconda, skip for miniforge)
-      if conda info | grep -qi "channel.*defaults"; then
-        conda_update_output="$(conda update -n base -c defaults conda -y 2>&1)" || conda_update_exit_code=$?
-      else
-        # For miniforge, update without specifying defaults channel
-        conda_update_output="$(conda update -n base conda -y 2>&1)" || conda_update_exit_code=$?
-      fi
-
-      if [[ $conda_update_exit_code -eq 0 ]]; then
-        # Check if output indicates an actual update occurred
-        if echo "$conda_update_output" | grep -qiE "(downloading|installing|updating|changed|upgraded)"; then
-          echo "  conda updated successfully"
-        elif echo "$conda_update_output" | grep -qiE "(already|up to date|All requested packages already installed)"; then
-          echo "  ${BLUE}INFO:${NC} conda is already up to date"
-        else
-          echo "  ${BLUE}INFO:${NC} conda checked (may already be up to date)"
-        fi
-      else
-        conda_errors+=("conda_update")
-        echo "  ${RED}WARNING:${NC} conda update failed (exit code: $conda_update_exit_code)"
-      fi
-      
-      # Update all packages in base environment
-      local conda_packages_output=""
-      local conda_packages_exit_code=0
-      conda_packages_output="$(conda update --all -y 2>&1)" || conda_packages_exit_code=$?
-
-      if [[ $conda_packages_exit_code -eq 0 ]]; then
-        # Check if output indicates packages were actually updated
-        if echo "$conda_packages_output" | grep -qiE "(downloading|installing|updating|changed|upgraded|will be)"; then
-          echo "  conda packages updated successfully"
-        elif echo "$conda_packages_output" | grep -qiE "(already|up to date|All requested packages already installed)"; then
-          echo "  ${BLUE}INFO:${NC} conda packages are already up to date"
-        else
-          echo "  ${BLUE}INFO:${NC} conda packages checked (may already be up to date)"
-        fi
-      else
-        conda_errors+=("conda_packages")
-        echo "  ${RED}WARNING:${NC} Some conda packages failed to update (exit code: $conda_packages_exit_code)"
-      fi
-      
-      # Clean conda cache
-      conda clean --all -y 2>/dev/null || conda_errors+=("conda_clean")
-      
-      # Report summary of conda issues
-      if [[ ${#conda_errors[@]} -gt 0 ]]; then
-        echo "  conda issues: ${conda_errors[*]}"
-        _update_failed=1
-      fi
+      _conda_update_base
     else
       # Miniforge installed but not initialized in PATH - detect dynamically
       local miniforge_path=""
@@ -1852,61 +1700,7 @@ EOF
         eval "$("$miniforge_path/conda" shell.zsh hook 2>/dev/null)" || true
         
         if command -v conda >/dev/null 2>&1; then
-          local conda_errors=()
-          
-          # Update conda itself first
-          local conda_update_output=""
-          local conda_update_exit_code=0
-
-          # Try updating conda (use defaults channel for Anaconda, skip for miniforge)
-          if conda info | grep -qi "channel.*defaults"; then
-            conda_update_output="$(conda update -n base -c defaults conda -y 2>&1)" || conda_update_exit_code=$?
-          else
-            # For miniforge, update without specifying defaults channel
-            conda_update_output="$(conda update -n base conda -y 2>&1)" || conda_update_exit_code=$?
-          fi
-
-          if [[ $conda_update_exit_code -eq 0 ]]; then
-            # Check if output indicates an actual update occurred
-            if echo "$conda_update_output" | grep -qiE "(downloading|installing|updating|changed|upgraded)"; then
-              echo "  conda updated successfully"
-            elif echo "$conda_update_output" | grep -qiE "(already|up to date|All requested packages already installed)"; then
-              echo "  ${BLUE}INFO:${NC} conda is already up to date"
-            else
-              echo "  ${BLUE}INFO:${NC} conda checked (may already be up to date)"
-            fi
-          else
-            conda_errors+=("conda_update")
-            echo "  ${RED}WARNING:${NC} conda update failed (exit code: $conda_update_exit_code)"
-          fi
-
-          # Update all packages in base environment
-          local conda_packages_output=""
-          local conda_packages_exit_code=0
-          conda_packages_output="$(conda update --all -y 2>&1)" || conda_packages_exit_code=$?
-
-          if [[ $conda_packages_exit_code -eq 0 ]]; then
-            # Check if output indicates packages were actually updated
-            if echo "$conda_packages_output" | grep -qiE "(downloading|installing|updating|changed|upgraded|will be)"; then
-              echo "  conda packages updated successfully"
-            elif echo "$conda_packages_output" | grep -qiE "(already|up to date|All requested packages already installed)"; then
-              echo "  ${BLUE}INFO:${NC} conda packages are already up to date"
-            else
-              echo "  ${BLUE}INFO:${NC} conda packages checked (may already be up to date)"
-            fi
-          else
-            conda_errors+=("conda_packages")
-            echo "  ${RED}WARNING:${NC} Some conda packages failed to update (exit code: $conda_packages_exit_code)"
-          fi
-          
-          # Clean conda cache
-          conda clean --all -y 2>/dev/null || conda_errors+=("conda_clean")
-          
-          # Report summary of conda issues
-          if [[ ${#conda_errors[@]} -gt 0 ]]; then
-            echo "  conda issues: ${conda_errors[*]}"
-            _update_failed=1
-          fi
+          _conda_update_base
         fi
       else
         echo "${GREEN}[conda]${NC} Not found - skipping"
@@ -1919,13 +1713,7 @@ EOF
     if [[ "$is_system_python" == true ]]; then
       echo "  ${BLUE}INFO:${NC} Skipping global packages upgrade (system Python)"
     else
-      # Upgrade genuinely user-installed packages. Homebrew's Python is
-      # externally-managed (PEP 668): pip refuses to touch its site-packages,
-      # and those packages are brew-managed anyway (e.g. `cryptography` is a brew
-      # formula). Trying to `pip install -U` them fails on EVERY run. So for
-      # Homebrew Python, scope the scan to the pip --user site and install with
-      # --user; everything in brew's tree is left to `brew upgrade`. pyenv Python
-      # is a normal environment — upgrade in place as before.
+      # Upgrade only user-site packages for Homebrew Python and use normal scope for pyenv.
       _ensure_system_path
       local pip_list_scope=() pip_user_flag=()
       if [[ "$is_homebrew_python" == true ]]; then
@@ -1951,8 +1739,7 @@ except Exception:
           if [[ "$is_homebrew_python" == true ]] && [[ "$package" == "pip" || "$package" == "setuptools" || "$package" == "wheel" ]]; then
             continue
           fi
-          # Capture output so a failure (e.g. cryptography needing a build
-          # toolchain) shows WHY instead of a bare "Failed to upgrade: <name>".
+          # Capture pip output to show actionable failure details.
           if ! _pip_err="$("$pybin" -m pip install -U "${pip_user_flag[@]}" "$package" 2>&1)"; then
             failed_packages+=("$package")
             printf '%s\n' "$_pip_err" | tail -3 | sed 's/^/      /'
@@ -2029,20 +1816,23 @@ except Exception:
   if [[ "$nvm_available" == "true" ]]; then
     echo "${GREEN}[Node]${NC} Ensuring latest LTS..."
     local prev_nvm="$(nvm current 2>/dev/null || true)"
-    nvm install --lts --latest-npm || true
-    nvm alias default 'lts/*' >/dev/null 2>&1 || true
+    if ! nvm install --lts --latest-npm; then
+      echo "  ${RED}WARNING:${NC} Failed to install/update Node LTS"
+      _update_failed=1
+    fi
+    nvm alias default 'lts/*' >/dev/null 2>&1 || _update_failed=1
     # `nvm install --lts` already activates the version; only run `nvm use
     # default` if `default` resolves to a different version, otherwise it
     # prints a redundant "Now using node vX.Y.Z" line.
     local default_target="$(nvm version default 2>/dev/null || true)"
     local active_now="$(nvm current 2>/dev/null || true)"
     if [[ -n "$default_target" && "$default_target" != "$active_now" ]]; then
-      nvm use default || true
+      nvm use default || _update_failed=1
     fi
     local active_nvm="$(nvm current 2>/dev/null || true)"
     # Only reinstall packages if we switched to a different version
     if [[ -n "$prev_nvm" && "$prev_nvm" != "system" && -n "$active_nvm" && "$prev_nvm" != "$active_nvm" ]]; then
-      nvm reinstall-packages "$prev_nvm" || true
+      nvm reinstall-packages "$prev_nvm" || _update_failed=1
     fi
     if [[ -n "$active_nvm" && "$active_nvm" != "system" ]]; then
       if ! _is_enabled "${MACSMITH_CLEAN_NVM:-}"; then
@@ -2081,7 +1871,7 @@ except Exception:
     fi
   elif [[ "$nvm_available" != "true" ]] && command -v brew >/dev/null 2>&1 && brew list node >/dev/null 2>&1; then
     echo "${GREEN}[Node]${NC} Updating Node via Homebrew..."
-    brew upgrade node || true
+    brew upgrade node || _update_failed=1
   else
     echo "${GREEN}[Node]${NC} Not found - skipping"
     echo "  ${BLUE}INFO:${NC} To install Node.js, run: 'dev-tools'"
@@ -2103,6 +1893,7 @@ except Exception:
       fi
     else
       echo "  ${RED}WARNING:${NC} npm install failed (exit code: $npm_install_exit_code)"
+      _update_failed=1
     fi
 
     # Update global packages
@@ -2126,6 +1917,7 @@ except Exception:
       fi
     else
       echo "  ${RED}WARNING:${NC} npm update failed (exit code: $npm_update_exit_code)"
+      _update_failed=1
     fi
 
     # Refresh command hash table after Node.js package updates
@@ -2145,9 +1937,7 @@ except Exception:
       echo "${GREEN}[RubyGems]${NC} Updating and cleaning gems..."
       local gem_update_output=""
       local gem_update_exit_code=0
-      # Timeout via perl (macOS ships it; `timeout` isn't default). Prevents
-      # indefinite hangs when rubygems.org is slow or unresponsive — previously
-      # users had to Ctrl-C the whole `update` run to recover.
+      # Time-limit gem update with Perl because macOS lacks timeout(1).
       gem_update_output="$(perl -e 'alarm shift; exec @ARGV' 180 gem update --silent --no-document 2>&1)" || gem_update_exit_code=$?
 
       if [[ $gem_update_exit_code -eq 0 ]]; then
@@ -2162,8 +1952,10 @@ except Exception:
       elif [[ $gem_update_exit_code -eq 142 ]] || [[ $gem_update_exit_code -eq 14 ]]; then
         # perl's alarm sends SIGALRM; bash reports 128+14=142 (or 14 as the raw signal)
         echo "  ${RED}WARNING:${NC} gem update timed out after 180s (network stall?)"
+        _update_failed=1
       else
         echo "  ${RED}WARNING:${NC} gem update failed (exit code: $gem_update_exit_code)"
+        _update_failed=1
       fi
       
       local gem_cleanup_output=""
@@ -2181,14 +1973,13 @@ except Exception:
         fi
       else
         echo "  ${RED}WARNING:${NC} gem cleanup failed"
+        _update_failed=1
       fi
     fi
   fi
   
   # chruby is a shell function, not a command - check if it's available.
-  # The Homebrew fallback must be at the same level as the other sourcing
-  # attempts; a previous version nested it inside the elif that checks
-  # /usr/local and ~/.local, so brew-installed chruby was never found.
+  # Check Homebrew for chruby independently of the other source paths.
   local chruby_available=false
   if type chruby >/dev/null 2>&1; then
     chruby_available=true
@@ -2221,18 +2012,29 @@ except Exception:
       chruby_target="$(_chruby_latest_installed 2>/dev/null || true)"
       if [[ -n "$chruby_target" ]]; then
         echo "${GREEN}[chruby]${NC} Activating existing: $chruby_target"
-        chruby "$chruby_target" >/dev/null 2>&1 || echo "${GREEN}[chruby]${NC} Failed to activate $chruby_target"
+        if ! chruby "$chruby_target" >/dev/null 2>&1; then
+          echo "${RED}[chruby]${NC} Failed to activate $chruby_target"
+          _update_failed=1
+        fi
       else
         echo "${GREEN}[chruby]${NC} No Ruby versions found, installing latest..."
         if command -v ruby-install >/dev/null 2>&1; then
           local latest_ruby="$(_chruby_latest_available)"
           if [[ -n "$latest_ruby" ]]; then
             echo "${GREEN}[chruby]${NC} Installing ruby-$latest_ruby..."
-            ruby-install ruby "$latest_ruby" && chruby_target="ruby-$latest_ruby"
-            chruby "$chruby_target" >/dev/null 2>&1 || echo "${GREEN}[chruby]${NC} Failed to activate $chruby_target"
+            if ruby-install ruby "$latest_ruby"; then
+              chruby_target="ruby-$latest_ruby"
+              chruby "$chruby_target" >/dev/null 2>&1 || _update_failed=1
+            else
+              _update_failed=1
+            fi
+          else
+            echo "${RED}[chruby]${NC} Could not determine latest Ruby version"
+            _update_failed=1
           fi
         else
-          echo "${GREEN}[chruby]${NC} ruby-install not found, cannot install Ruby"
+          echo "${RED}[chruby]${NC} ruby-install not found, cannot install Ruby"
+          _update_failed=1
         fi
       fi
     fi
@@ -2241,7 +2043,7 @@ except Exception:
     if _is_disabled "${MACSMITH_FIX_RUBY_GEMS:-}"; then
       echo "${GREEN}[Ruby]${NC} Gem auto-fix disabled; set MACSMITH_FIX_RUBY_GEMS=1 or unset to enable"
     else
-      _fix_all_ruby_gems
+      _fix_all_ruby_gems || _update_failed=1
     fi
   else
     echo "${GREEN}[chruby]${NC} Not found - skipping"
@@ -2309,6 +2111,7 @@ except Exception:
         fi
       else
         echo "  ${RED}WARNING:${NC} swiftly initialization failed"
+        _update_failed=1
       fi
     fi
     
@@ -2337,6 +2140,7 @@ except Exception:
       fi
     else
       echo "  ${RED}WARNING:${NC} swiftly self-update failed (may require manual intervention)"
+      _update_failed=1
     fi
     
     # swiftly list shows "(in use)" for release toolchains and "(default)" for snapshots
@@ -2382,7 +2186,9 @@ except Exception:
         if swiftly install "$swift_target_version" --assume-yes 2>/dev/null; then
           # Explicitly switch active toolchain (--use on install may not switch when already installed).
           # Run from $HOME so swiftly doesn't rewrite a project-local/ancestor .swift-version.
-          (cd "$HOME" && swiftly use "$swift_target_version") 2>/dev/null || true
+          if ! (cd "$HOME" && swiftly use "$swift_target_version") 2>/dev/null; then
+            _update_failed=1
+          fi
           hash -r 2>/dev/null || true
           # Verify the switch actually happened
           local verify_active="$(swiftly list 2>/dev/null | grep '(in use)' || true)"
@@ -2391,9 +2197,11 @@ except Exception:
           else
             echo "  ${RED}WARNING:${NC} Installed Swift $swift_target_version but active toolchain may not have switched"
             echo "  ${BLUE}INFO:${NC} Run 'swiftly use $swift_target_version' manually to switch"
+            _update_failed=1
           fi
         else
           echo "  ${RED}WARNING:${NC} Failed to install Swift $swift_target_version"
+          _update_failed=1
         fi
       else
         echo "  Swift is up to date ($current_swift)"
@@ -2420,6 +2228,7 @@ except Exception:
           hash -r 2>/dev/null || true
         else
           echo "  ${RED}WARNING:${NC} Failed to activate Swift $installed_swift"
+          _update_failed=1
         fi
       else
         # Install latest stable if no version is installed
@@ -2432,6 +2241,7 @@ except Exception:
             hash -r 2>/dev/null || true
           else
             echo "  ${RED}WARNING:${NC} Failed to install Swift $latest_stable"
+            _update_failed=1
           fi
         else
           echo "  ${BLUE}INFO:${NC} Could not determine latest stable version"
@@ -2451,6 +2261,7 @@ except Exception:
         echo "  SUCCESS: Updated to Swift $new_version"
       else
         echo "  ${RED}WARNING:${NC} Homebrew Swift update failed"
+        _update_failed=1
       fi
     else
       echo "  ${BLUE}INFO:${NC} Swift is system-installed (update via Xcode or install swiftly for version management)"
@@ -2516,8 +2327,12 @@ except Exception:
     # output mentions an installation/update.
     echo "  Ensuring rustup components are installed..."
     local rustup_component_output=""
-    rustup_component_output="$(rustup component add rustfmt clippy 2>&1)" || true
-    if echo "$rustup_component_output" | grep -qE "^(installing|info: installing)"; then
+    local rustup_component_exit=0
+    rustup_component_output="$(rustup component add rustfmt clippy 2>&1)" || rustup_component_exit=$?
+    if [[ $rustup_component_exit -ne 0 ]]; then
+      rust_errors+=("components")
+      echo "  ${RED}WARNING:${NC} rustup component install failed"
+    elif echo "$rustup_component_output" | grep -qE "^(installing|info: installing)"; then
       echo "    Components added/updated"
     else
       echo "  ${BLUE}INFO:${NC} rustup components already up to date"
@@ -2602,9 +2417,7 @@ except Exception:
     tool_list_output="$(dotnet tool list --global 2>&1)" || tool_list_exit_code=$?
     local tool_count=0
     if [[ $tool_list_exit_code -eq 0 ]]; then
-      # Count only rows whose 2nd field is a version (starts with a digit). The
-      # old ^[a-zA-Z] also matched the "Package Id  Version  Commands" header,
-      # so a zero-tool environment reported 1 and ran a pointless update.
+      # Count only tool rows whose second field begins with a version number.
       tool_count=$(echo "$tool_list_output" | grep -E "^[a-zA-Z0-9._-]+[[:space:]]+[0-9]" | wc -l | tr -d ' ' || echo "0")
     fi
 
@@ -2627,7 +2440,6 @@ except Exception:
       else
         dotnet_errors+=("tool_update")
         echo "    ${RED}WARNING:${NC} Global .NET tools update failed (exit code: $tool_update_exit_code)"
-        echo "    ${RED}WARNING:${NC} Failed to update global .NET tools"
       fi
     fi
     
@@ -2713,7 +2525,7 @@ except Exception:
     
     # Update nix profile packages
     local profile_count
-    profile_count=$(nix profile list 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    profile_count=$(_nix_profile_count)
     if [[ "$profile_count" -gt 0 ]]; then
       local nix_profile_output=""
       local nix_profile_exit_code=0
@@ -2754,7 +2566,6 @@ except Exception:
       else
         nix_errors+=("nix-env")
         echo "  ${RED}WARNING:${NC} nix-env update failed (exit code: $nix_env_exit_code)"
-        echo "  ${RED}WARNING:${NC} nix-env update failed"
       fi
     fi
     
@@ -2765,9 +2576,9 @@ except Exception:
     local gc_exit_code=0
     gc_output=$(nix store gc 2>&1) || gc_exit_code=$?
     if [[ $gc_exit_code -ne 0 ]]; then
-      # Retry with sudo using classic command (no experimental features needed)
+      # Retry classic Nix cleanup only with cached sudo credentials.
       gc_exit_code=0
-      gc_output=$(sudo nix-collect-garbage 2>&1) || gc_exit_code=$?
+      gc_output=$(sudo -n nix-collect-garbage 2>&1) || gc_exit_code=$?
     fi
     if [[ $gc_exit_code -eq 0 ]]; then
       local freed_space
@@ -2778,18 +2589,19 @@ except Exception:
         echo "  Nix store cleaned successfully"
       fi
     else
-      nix_errors+=("gc")
-      echo "  ${RED}WARNING:${NC} Nix store cleanup failed"
+      # Treat missing cached sudo as a skipped cleanup rather than an update failure.
+      echo "  ${BLUE}INFO:${NC} Nix store cleanup skipped (needs sudo; run 'sudo nix-collect-garbage')"
     fi
-    
+
     # Optimise store (may require sudo for hardlinking in /nix/store)
-    # Try new CLI first, fall back to classic nix-store --optimise (works without experimental features)
+    # Try new CLI first, fall back to classic nix-store --optimise via non-
+    # interactive sudo (-n) so it never prompts mid-update.
     if nix store optimise 2>/dev/null; then
       echo "  Nix store optimised successfully"
-    elif sudo nix-store --optimise 2>/dev/null; then
+    elif sudo -n nix-store --optimise 2>/dev/null; then
       echo "  Nix store optimised successfully (via sudo)"
     else
-      echo "  ${RED}WARNING:${NC} Nix store optimisation failed"
+      echo "  ${BLUE}INFO:${NC} Nix store optimisation skipped (needs sudo)"
     fi
     
     # Smart Nix CLI upgrade check (preview and auto-skip downgrades)
@@ -2800,7 +2612,8 @@ except Exception:
     if [[ -n "$current_nix_version" && "$current_nix_version" != "not in PATH" && "$current_nix_version" != "unknown" ]]; then
       # Run preview (dry-run) to check target version
       local upgrade_preview
-      upgrade_preview=$(sudo -H nix upgrade-nix --dry-run --profile /nix/var/nix/profiles/default 2>&1 || echo "")
+      # Skip the version check when sudo credentials are not cached.
+      upgrade_preview=$(sudo -n -H nix upgrade-nix --dry-run --profile /nix/var/nix/profiles/default 2>&1 || echo "")
       
       if [[ -n "$upgrade_preview" ]]; then
         # Parse target version from preview output
@@ -2849,8 +2662,7 @@ except Exception:
       echo "  Could not determine current Nix version"
     fi
     
-    # Fix zsh insecure completion directories if any. compaudit ships with
-    # zsh's compinit (autoload-on-demand), not Oh My Zsh — works on any zsh.
+    # Fix insecure completion directories through zsh's compaudit.
     if autoload -Uz compaudit 2>/dev/null && command -v compaudit >/dev/null 2>&1; then
       local insecure_dirs
       insecure_dirs=$(compaudit 2>&1 || true)
@@ -2873,8 +2685,7 @@ except Exception:
   hash -r 2>/dev/null || true
   _ensure_system_path
   echo "${GREEN}==> Update finished $(date)${NC}"
-  # Propagate subsystem failures so cron/CI wrappers that gate on the exit code
-  # of `macsmith update` don't treat a broken update as success.
+  # Propagate subsystem failures to callers.
   return "$_update_failed"
 }
 
@@ -2922,10 +2733,17 @@ _run_update_from_safe_cwd() {
   _original_abs="$(builtin cd "$_original_cwd" 2>/dev/null && pwd -P)" || _original_abs="$_original_cwd"
   _safe_abs="$(builtin cd "$_safe_cwd" 2>/dev/null && pwd -P)" || _safe_abs="$_safe_cwd"
 
+  # Reject workdirs anywhere inside the detected project root.
+  local _project_root="" _guard_abs="$_original_abs"
+  _project_root="$(_find_project_root "$_original_cwd")"
+  if [[ -n "$_project_root" ]]; then
+    _guard_abs="$(builtin cd "$_project_root" 2>/dev/null && pwd -P)" || _guard_abs="$_project_root"
+  fi
+
   case "$_safe_abs" in
-    "$_original_abs"| "$_original_abs"/*)
+    "$_guard_abs"| "$_guard_abs"/*)
       echo "  ${RED}ERROR:${NC} Project file '$_project_marker' detected in $_original_cwd"
-      echo "  ${RED}ERROR:${NC} MACSMITH_UPDATE_WORKDIR must be outside the project directory"
+      echo "  ${RED}ERROR:${NC} MACSMITH_UPDATE_WORKDIR must be outside the project directory (${_project_root:-$_original_cwd})"
       echo "  ${BLUE}INFO:${NC} Current safe directory: $_safe_cwd"
       echo "  ${BLUE}INFO:${NC} Set MACSMITH_ALLOW_PROJECT_MODIFY=1 to opt in to running from the project."
       return 1
@@ -2957,24 +2775,21 @@ update() {
 
 # ================================ VERIFY ===================================
 
-# Bounded version probe shared by verify()/versions(): time-cap each external
-# `--version` call (macOS has no timeout(1), so use perl's alarm — the same
-# idiom as the gem-update timeout) and detach stdin from the terminal so a tool
-# that drops into a REPL or daemon/network prompt (scala, clojure, gradle, mvn)
-# can never hang the run. Caller adds its own 2>/dev/null|2>&1 and pipes.
+# Time-limit version probes and detach stdin to prevent interactive hangs.
 _probe() { perl -e 'alarm shift; exec @ARGV' 10 "$@" </dev/null; }
+
+# Time-limit a network command with Perl's alarm.
+_timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 
 verify() {
   _ensure_system_path || true
   echo "${GREEN}==> Verify $(date)${NC}"
-  # Counters for the summary line printed at the very end. The existing
-  # per-tool output is unchanged — this is purely additive so users get a
-  # "tl;dr" without scrolling through 30+ lines.
+  # Count per-tool results for the final summary.
   local _verify_ok=0
   local _verify_warn=0
   local _verify_miss=0
   local _verify_missing=()
-  local ok warn miss
+  # Update verification counters through zsh's dynamic scope.
   ok()   { printf "%-15s OK (%s)\n" "$1" "$2"; ((_verify_ok++)) || true; }
   warn() { printf "%-15s ${RED}WARN${NC} (%s)\n" "$1" "$2"; ((_verify_warn++)) || true; }
   miss() { printf "%-15s Not installed\n" "$1"; ((_verify_miss++)) || true; _verify_missing+=("$1"); }
@@ -3364,9 +3179,7 @@ verify() {
     miss "PostgreSQL"
   fi
   
-  # Modern language tooling (installed via dev-tools.sh). Probes are stdin-
-  # detached + time-capped via _probe so a tool that opens a REPL/daemon prompt
-  # can't hang verify; an empty result is a WARN, not a bogus "OK ()".
+  # Treat empty, time-limited language-tool probes as warnings.
   local _ver=""
   for _tool in uv bun pnpm deno; do
     if command -v "$_tool" >/dev/null 2>&1; then
@@ -3374,10 +3187,7 @@ verify() {
       if [[ -n "$_ver" ]]; then ok "$_tool" "$_ver"; else warn "$_tool" "version probe failed/timed out"; fi
     fi
   done
-  # JVM ecosystem (opt-in batch in dev-tools.sh).
-  # kotlin writes the version to stderr; gradle's first stdout line is blank
-  # (the actual "Gradle X.Y" line is further down). Per-tool detection so all
-  # six render a real version instead of "OK ()".
+  # Probe each JVM tool according to its version-output format.
   for _tool in kotlin scala clojure gradle mvn groovy; do
     if command -v "$_tool" >/dev/null 2>&1; then
       case "$_tool" in
@@ -3746,7 +3556,7 @@ versions() {
     local nix_version
     nix_version="$(nix --version 2>/dev/null | head -n1 | sed 's/nix (Nix) //' || echo "unknown")"
     local profile_count
-    profile_count=$(nix profile list 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    profile_count=$(_nix_profile_count)
     local env_count
     env_count=$(nix-env -q 2>/dev/null | wc -l | tr -d ' ' || echo "0")
     local total_count=$((profile_count + env_count))
@@ -3792,22 +3602,19 @@ versions() {
     echo "PostgreSQL ..... not installed"
   fi
   
-  # Modern language tooling (installed via dev-tools.sh).
-  # Match the dotted "Tool ........... value" style used above, instead of
-  # printf '%-15s %s\n' which produced bare-spaces and broke the column.
+  # Format modern language tools with the existing dotted version columns.
   local _ver="" _dots=""
   for _tool in uv bun pnpm deno; do
     if command -v "$_tool" >/dev/null 2>&1; then
       _ver="$(_probe "$_tool" --version 2>/dev/null | head -n1)"
-      # Strip leading "tool " prefix so we don't print the name twice
-      # (e.g. `uv --version` -> "uv 0.11.7" becomes "0.11.7").
+    # Strip a repeated tool-name prefix from version output.
       _ver="${_ver#"$_tool" }"
+      [[ -z "$_ver" ]] && _ver="(probe timed out)"
       _dots="$(printf '%*s' $((15 - ${#_tool})) '' | tr ' ' '.')"
       printf '%s %s %s\n' "$_tool" "$_dots" "$_ver"
     fi
   done
-  # JVM ecosystem (opt-in batch in dev-tools.sh). See verify() for why kotlin
-  # and gradle need special-casing.
+  # Probe JVM tools with the same special cases as verify().
   for _tool in kotlin scala clojure gradle mvn groovy; do
     if command -v "$_tool" >/dev/null 2>&1; then
       case "$_tool" in
@@ -3815,6 +3622,7 @@ versions() {
         gradle) _ver="$(_probe gradle --version 2>&1 | grep -E '^Gradle ' | head -n1)" ;;
         *)      _ver="$(_probe "$_tool" --version 2>/dev/null | head -n1)" ;;
       esac
+      [[ -z "$_ver" ]] && _ver="(probe timed out)"
       _dots="$(printf '%*s' $((15 - ${#_tool})) '' | tr ' ' '.')"
       printf '%s %s %s\n' "$_tool" "$_dots" "$_ver"
     fi
@@ -3830,14 +3638,49 @@ versions() {
 readonly GITHUB_REPO="26zl/macsmith"
 readonly DATA_DIR="$HOME/.local/share/macsmith"
 
-# Regenerate the managed ~/.zprofile PATH block during `upgrade`. install.sh
-# owns this block; `upgrade` historically skipped it, so existing installs never
-# picked up login-shell PATH fixes (Homebrew-first ordering, dedup, Nix order)
-# without re-running sys-install. We slice the block straight out of the freshly
-# extracted install.sh — between its full-line markers — instead of duplicating
-# the heredoc here, so the two can never drift. Best-effort: failure warns but
-# does not fail the upgrade. Markers must be matched as anchored full lines: the
-# loose substring also appears in install.sh's own block-management code.
+# Keep the five most recent upgrade backups.
+_rotate_backups() {
+  local base="$1"
+  local old
+  old="$(ls -1t "${base}".backup-* 2>/dev/null | tail -n +6)"
+  [[ -z "$old" ]] && return 0
+  printf '%s\n' "$old" | while IFS= read -r f; do
+    [[ -n "$f" ]] && rm -f "$f" 2>/dev/null
+  done
+  return 0
+}
+
+_atomic_write_preserving_mode() {
+  local target="$1"
+  local dir="${target:h}" tmp="" old_umask mode=""
+  [[ -d "$dir" ]] || mkdir -p "$dir" || return 1
+  [[ -e "$target" ]] && mode="$(stat -f '%Lp' "$target" 2>/dev/null || true)"
+
+  old_umask="$(umask)"
+  umask 077
+  if ! tmp="$(mktemp "${target}.macsmith.XXXXXX")"; then
+    umask "$old_umask"
+    return 1
+  fi
+  umask "$old_umask"
+  _UPGRADE_TMP_FILES+=("$tmp")
+
+  if ! cat > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if [[ -n "$mode" ]] && ! chmod "$mode" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$target"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  return 0
+}
+
+# Refresh the managed zprofile block from install.sh using anchored markers.
 _refresh_zprofile_block() {
   local src="$1"
   local zprofile="$HOME/.zprofile"
@@ -3856,25 +3699,42 @@ _refresh_zprofile_block() {
     return 0
   fi
 
-  # Strip any existing managed block (markers as literal substrings — on the
-  # user's own .zprofile they only appear as the managed block, no collision).
+  # Strip any existing managed block, matching the full marker lines with
+  # anchored regexes so a stray occurrence of the marker text elsewhere in the
+  # user's .zprofile can't start (or fail to close) the strip.
   local existing=""
   if [[ -f "$zprofile" ]]; then
     existing="$(awk '
-      index($0, "FINAL PATH CLEANUP (FOR .ZPROFILE)") { skip = 1; next }
-      skip && index($0, "End macsmith managed block") { skip = 0; next }
+      /^# =+ FINAL PATH CLEANUP \(FOR \.ZPROFILE\) =+$/ { skip = 1; next }
+      skip && /^# End macsmith managed block$/ { skip = 0; next }
       !skip { print }
     ' "$zprofile")"
-    cp "$zprofile" "$zprofile.backup-$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
   fi
 
-  # Atomic write: tempfile next to target, then mv over.
-  local tmp="${zprofile}.upgrade.$$.tmp"
-  if printf '%s\n%s\n' "$existing" "$block" > "$tmp" 2>/dev/null && mv -f "$tmp" "$zprofile"; then
+  # Restore install.sh's single blank line before the managed marker.
+  local new_content
+  new_content="$(printf '%s\n\n%s\n' "$existing" "$block")"
+
+  # Skip rewriting and backing up an unchanged block.
+  if [[ -f "$zprofile" ]] && [[ "$new_content" == "$(cat "$zprofile")" ]]; then
+    echo "  ~/.zprofile PATH block already current"
+    return 0
+  fi
+
+  if [[ -f "$zprofile" ]]; then
+    local zprofile_backup="$zprofile.backup-$(date +%Y%m%d%H%M%S)"
+    if ! cp -p "$zprofile" "$zprofile_backup"; then
+      echo "  ${YELLOW}WARN:${NC} backup failed; left ~/.zprofile unchanged"
+      return 1
+    fi
+    _rotate_backups "$zprofile"
+  fi
+
+  if printf '%s\n' "$new_content" | _atomic_write_preserving_mode "$zprofile"; then
     echo "  refreshed ~/.zprofile (PATH block)"
   else
-    rm -f "$tmp" 2>/dev/null || true
     echo "  ${YELLOW}WARN:${NC} failed to refresh ~/.zprofile"
+    return 1
   fi
 }
 
@@ -3899,7 +3759,7 @@ _self_upgrade() {
   # Fetch latest release from GitHub API
   echo "Checking for updates..."
   local api_response=""
-  api_response="$(curl -s --connect-timeout 15 --max-time 30 --retry 3 "https://api.github.com/repos/$GITHUB_REPO/releases/latest" 2>/dev/null)"
+  api_response="$(_curl_safe -s --connect-timeout 15 --max-time 30 --retry 3 "https://api.github.com/repos/$GITHUB_REPO/releases/latest" 2>/dev/null)"
   if [[ -z "$api_response" ]]; then
     echo "${RED}❌ Failed to reach GitHub API${NC}"
     return 1
@@ -3907,7 +3767,7 @@ _self_upgrade() {
 
   local remote_version=""
   remote_version="$(echo "$api_response" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
-  if [[ -z "$remote_version" ]]; then
+  if [[ -z "$remote_version" ]] || [[ ! "$remote_version" =~ ^v[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
     echo "${RED}❌ Could not parse latest release version${NC}"
     echo "  Check https://github.com/$GITHUB_REPO/releases"
     return 1
@@ -3924,17 +3784,17 @@ _self_upgrade() {
     return 0
   fi
 
-  # Downgrade protection: only proceed if the remote tag is strictly newer.
-  # Tags are vYYYY.MM.DD-<sha> or vX.Y.Z; `sort -V` orders both sanely. If the
-  # newest of the two is the local one, we're already ahead — never clobber
-  # current code with an older/yanked release.
-  local _newest=""
-  _newest="$(printf '%s\n%s\n' "$local_version" "$remote_version" | sort -V | tail -n1)"
-  if [[ "$_newest" != "$remote_version" ]]; then
-    echo ""
-    echo "${GREEN}✅ Local version ($local_version) is newer than latest release ($remote_version) — nothing to do${NC}"
-    rm -f "$DATA_DIR/latest-remote-version"
-    return 0
+  # Compare monotonic tag prefixes while allowing distinct same-day release hashes.
+  local _local_base="${local_version%%-*}" _remote_base="${remote_version%%-*}"
+  if [[ "$_local_base" != "$_remote_base" ]]; then
+    local _newest=""
+    _newest="$(printf '%s\n%s\n' "$_local_base" "$_remote_base" | sort -V | tail -n1)"
+    if [[ "$_newest" != "$_remote_base" ]]; then
+      echo ""
+      echo "${GREEN}✅ Local version ($local_version) is newer than latest release ($remote_version) — nothing to do${NC}"
+      rm -f "$DATA_DIR/latest-remote-version"
+      return 0
+    fi
   fi
 
   echo ""
@@ -3947,35 +3807,44 @@ _self_upgrade() {
   asset_url="$(echo "$api_response" | sed -n 's/.*"browser_download_url": *"\(https:\/\/[^"]*macsmith-[^"]*\.zip\)".*/\1/p' | grep -v '\.sha256' | head -n1)"
   sha_url="$(echo "$api_response" | sed -n 's/.*"browser_download_url": *"\(https:\/\/[^"]*macsmith-[^"]*\.zip\.sha256\)".*/\1/p' | head -n1)"
   zipball_url="$(echo "$api_response" | sed -n 's/.*"zipball_url": *"\([^"]*\)".*/\1/p')"
+  local expected_asset="macsmith-${remote_version}.zip"
+  local expected_asset_url="https://github.com/${GITHUB_REPO}/releases/download/${remote_version}/${expected_asset}"
+  if [[ -n "$asset_url" && "$asset_url" != "$expected_asset_url" ]]; then
+    echo "${RED}❌ Release asset URL does not match the advertised tag${NC}"
+    return 1
+  fi
+  if [[ -n "$sha_url" && "$sha_url" != "${expected_asset_url}.sha256" ]]; then
+    echo "${RED}❌ Release checksum URL does not match the advertised tag${NC}"
+    return 1
+  fi
 
   local tmp_dir=""
   tmp_dir="$(mktemp -d)"
-  # Register the temp dir with the script-level cleanup instead of a
-  # function-local trap. A `trap ... EXIT INT TERM HUP` here fired on FUNCTION
-  # return (zsh), prematurely releasing the lock, and its cleanup-only INT
-  # handler shadowed _on_interrupt — so Ctrl-C during the upgrade did NOT abort
-  # the run. _cleanup_lock / _on_interrupt now own all cleanup.
+  # Register upgrade files with script-level cleanup to avoid zsh local traps.
   _UPGRADE_TMP_DIR="$tmp_dir"
 
   # Download + verify against published SHA-256 when possible
   if [[ -n "$asset_url" ]] && [[ -n "$sha_url" ]]; then
     echo "Downloading release asset ($asset_url)..."
-    if ! curl -sL --connect-timeout 15 --max-time 120 --retry 3 "$asset_url" -o "$tmp_dir/release.zip" 2>/dev/null; then
+    if ! _curl_safe -sL --connect-timeout 15 --max-time 120 --retry 3 "$asset_url" -o "$tmp_dir/release.zip" 2>/dev/null; then
       echo "${RED}❌ Asset download failed${NC}"
       rm -rf "$tmp_dir"
       return 1
     fi
     echo "Fetching checksum..."
-    if ! curl -sL --connect-timeout 15 --max-time 60 --retry 3 "$sha_url" -o "$tmp_dir/release.zip.sha256" 2>/dev/null; then
+    if ! _curl_safe -sL --connect-timeout 15 --max-time 60 --retry 3 "$sha_url" -o "$tmp_dir/release.zip.sha256" 2>/dev/null; then
       echo "${YELLOW}⚠️  Could not fetch checksum; aborting to be safe${NC}"
       rm -rf "$tmp_dir"
       return 1
     fi
     # The .sha256 file format is: "<hash>  <filename>"
-    local expected_sha actual_sha
+    local expected_sha checksum_name actual_sha
     expected_sha="$(awk '{print $1}' "$tmp_dir/release.zip.sha256")"
+    checksum_name="$(awk '{print $2}' "$tmp_dir/release.zip.sha256")"
     actual_sha="$(shasum -a 256 "$tmp_dir/release.zip" | awk '{print $1}')"
-    if [[ -z "$expected_sha" ]] || [[ "$expected_sha" != "$actual_sha" ]]; then
+    if [[ ! "$expected_sha" =~ ^[0-9a-f]{64}$ ]] \
+      || [[ "$checksum_name" != "$expected_asset" ]] \
+      || [[ "$expected_sha" != "$actual_sha" ]]; then
       echo "${RED}❌ SHA-256 mismatch — refusing to install.${NC}"
       echo "  expected: $expected_sha"
       echo "  actual:   $actual_sha"
@@ -3983,6 +3852,23 @@ _self_upgrade() {
       return 1
     fi
     echo "${GREEN}✅ Checksum verified${NC}"
+
+    if command -v gh >/dev/null 2>&1 \
+      && gh attestation verify "$tmp_dir/release.zip" \
+        --repo "$GITHUB_REPO" \
+        --signer-workflow "$GITHUB_REPO/.github/workflows/release.yml" \
+        >/dev/null 2>&1; then
+      echo "${GREEN}✅ GitHub build provenance verified${NC}"
+    elif _is_enabled "${MACSMITH_ALLOW_CHECKSUM_ONLY_UPGRADE:-}"; then
+      echo "${YELLOW}⚠️  Provenance verification failed or gh is unavailable.${NC}"
+      echo "  Continuing because MACSMITH_ALLOW_CHECKSUM_ONLY_UPGRADE is explicitly enabled."
+    else
+      echo "${RED}❌ Could not verify GitHub build provenance; refusing to install.${NC}"
+      echo "  Install/authenticate GitHub CLI and retry, or explicitly accept checksum-only"
+      echo "  verification with MACSMITH_ALLOW_CHECKSUM_ONLY_UPGRADE=1."
+      rm -rf "$tmp_dir"
+      return 1
+    fi
   elif [[ -n "$zipball_url" ]]; then
     # Fallback: no packaged asset found (pre-release-pipeline tags etc.).
     # This path is UNVERIFIED — refuse by default and require explicit opt-in.
@@ -3999,7 +3885,7 @@ _self_upgrade() {
       return 1
     fi
     echo "${YELLOW}⚠️  MACSMITH_ALLOW_UNSIGNED_UPGRADE=1 — downloading UNVERIFIED zipball.${NC}"
-    if ! curl -sL --connect-timeout 15 --max-time 120 --retry 3 "$zipball_url" -o "$tmp_dir/release.zip" 2>/dev/null; then
+    if ! _curl_safe -sL --connect-timeout 15 --max-time 120 --retry 3 "$zipball_url" -o "$tmp_dir/release.zip" 2>/dev/null; then
       echo "${RED}❌ Download failed${NC}"
       rm -rf "$tmp_dir"
       return 1
@@ -4016,10 +3902,7 @@ _self_upgrade() {
     return 1
   fi
 
-  # Locate the payload root. Our published release asset (release.yml builds it via
-  # `cd $PKG && zip ... .`) has the files at the zip ROOT, while GitHub's
-  # auto-generated zipball wraps everything in one top-level dir. Don't assume
-  # either layout — find macsmith.sh and treat its directory as the root.
+  # Locate the payload root for flat release assets and wrapped GitHub zipballs.
   local extract_dir="" _ms_path=""
   _ms_path="$(find "$tmp_dir" -maxdepth 2 -name 'macsmith.sh' -type f | head -1)"
   [[ -n "$_ms_path" ]] && extract_dir="$(dirname "$_ms_path")"
@@ -4031,10 +3914,9 @@ _self_upgrade() {
 
   # Track failures
   local upgrade_failed=false
+  local failed_artifacts=()
 
-  # Update macsmith binary. Write to a temp file next to the target
-  # then mv into place so Ctrl-C can't leave the binary half-written (and
-  # since we ARE that binary, a partial write would brick ourselves).
+  # Replace the running binary through a destination-side temporary file.
   local local_bin="$HOME/.local/bin"
   mkdir -p "$local_bin" 2>/dev/null || true
   if [[ -f "$extract_dir/macsmith.sh" ]]; then
@@ -4048,66 +3930,78 @@ _self_upgrade() {
       rm -f "$_ms_tmp" 2>/dev/null || true
       echo "  ${RED}Failed: macsmith (check permissions on $local_bin)${NC}"
       upgrade_failed=true
+      failed_artifacts+=("$local_bin/macsmith")
     fi
   fi
 
-  # Update zsh.sh -> ~/.zshrc (preserve user customizations). Write atomically
-  # via tempfile + mv so Ctrl-C can't leave a half-written shell config.
+  # Replace ~/.zshrc atomically while preserving user customizations.
   if [[ -f "$extract_dir/zsh.sh" ]]; then
     local zshrc="$HOME/.zshrc"
     local new_zshrc_content
+    local user_section=""
+    local zshrc_ready=true
     new_zshrc_content="$(cat "$extract_dir/zsh.sh")"
 
     if [[ -f "$zshrc" ]]; then
-      cp "$zshrc" "$zshrc.backup-$(date +%Y%m%d%H%M%S)"
-      # Preserve content after the USER CUSTOMIZATIONS marker (excluding marker)
-      local user_section=""
-      if grep -q "# USER CUSTOMIZATIONS" "$zshrc" 2>/dev/null; then
-        user_section="$(sed -n '/^# USER CUSTOMIZATIONS/,$p' "$zshrc" | tail -n +2)"
-      fi
-      if [[ -n "$user_section" ]]; then
-        # If the new zsh.sh already includes the marker, the section belongs right after it
-        if ! printf '%s' "$new_zshrc_content" | grep -q "# USER CUSTOMIZATIONS"; then
-          new_zshrc_content+="
+      local zshrc_backup="$zshrc.backup-$(date +%Y%m%d%H%M%S)"
+      if ! cp -p "$zshrc" "$zshrc_backup"; then
+        echo "  ${RED}Failed: backup for ~/.zshrc (original left unchanged)${NC}"
+        upgrade_failed=true
+        zshrc_ready=false
+        failed_artifacts+=("$zshrc_backup")
+      else
+        _rotate_backups "$zshrc"
+        if grep -q "# USER CUSTOMIZATIONS" "$zshrc" 2>/dev/null; then
+          user_section="$(sed -n '/^# USER CUSTOMIZATIONS/,$p' "$zshrc" | tail -n +2)"
+        fi
+        if [[ -n "$user_section" ]]; then
+          if ! printf '%s' "$new_zshrc_content" | grep -q "# USER CUSTOMIZATIONS"; then
+            new_zshrc_content+="
 # USER CUSTOMIZATIONS
 "
-        else
-          new_zshrc_content+="
+          else
+            new_zshrc_content+="
 "
+          fi
+          new_zshrc_content+="$user_section"
         fi
-        new_zshrc_content+="$user_section"
       fi
     fi
 
-    local _zsh_tmp="${zshrc}.tmp.$$"
-    _UPGRADE_TMP_FILES+=("$_zsh_tmp")
-    if printf '%s\n' "$new_zshrc_content" > "$_zsh_tmp" && mv -f "$_zsh_tmp" "$zshrc"; then
-      echo "  Updated: ~/.zshrc${user_section:+ (backup created)}"
-    else
-      rm -f "$_zsh_tmp" 2>/dev/null || true
-      echo "  ${RED}Failed: ~/.zshrc (check permissions)${NC}"
-      upgrade_failed=true
+    if [[ "$zshrc_ready" == true ]]; then
+      if printf '%s\n' "$new_zshrc_content" | _atomic_write_preserving_mode "$zshrc"; then
+        echo "  Updated: ~/.zshrc${user_section:+ (backup created)}"
+      else
+        echo "  ${RED}Failed: ~/.zshrc (check permissions)${NC}"
+        upgrade_failed=true
+        failed_artifacts+=("$HOME/.zshrc")
+      fi
     fi
   fi
 
-  # Copy top-level scripts to data dir
+  # Block the version bump if required data-directory script copies fail.
   mkdir -p "$DATA_DIR"
   for script_file in install.sh dev-tools.sh bootstrap.sh zsh.sh macsmith.sh; do
     if [[ -f "$extract_dir/$script_file" ]]; then
-      cp "$extract_dir/$script_file" "$DATA_DIR/$script_file" || true
+      if ! cp "$extract_dir/$script_file" "$DATA_DIR/$script_file"; then
+        echo "  ${RED}Failed: $DATA_DIR/$script_file${NC}"
+        upgrade_failed=true
+        failed_artifacts+=("$DATA_DIR/$script_file")
+      fi
     fi
   done
 
-  # Mirror scripts/ helpers AND refresh their ~/.local/bin/ shims in-place.
-  # Without this, existing users can't pick up new helpers (uninstall-nix,
-  # uninstall-macsmith) via `upgrade` — only fresh sys-install would deliver
-  # them. Helpers are small; overwriting is safe.
+  # Refresh helper mirrors and their installed command shims.
   if [[ -d "$extract_dir/scripts" ]]; then
     mkdir -p "$DATA_DIR/scripts"
     local _helper
     for _helper in nix-macos-maintenance.sh uninstall-nix-macos.sh uninstall-macsmith.sh; do
       if [[ -f "$extract_dir/scripts/$_helper" ]]; then
-        cp "$extract_dir/scripts/$_helper" "$DATA_DIR/scripts/$_helper" || true
+        if ! cp "$extract_dir/scripts/$_helper" "$DATA_DIR/scripts/$_helper"; then
+          echo "  ${RED}Failed: $DATA_DIR/scripts/$_helper${NC}"
+          upgrade_failed=true
+          failed_artifacts+=("$DATA_DIR/scripts/$_helper")
+        fi
       fi
     done
     # Refresh the installed-bin shims. Drop the trailing .sh when placing.
@@ -4118,22 +4012,41 @@ _self_upgrade() {
       if [[ -f "$extract_dir/scripts/$_bin.sh" ]]; then
         # Atomic-ish: write to tempfile next to target, chmod, mv over.
         local _tmp="$_local_bin/.$_bin.$$.tmp"
+        _UPGRADE_TMP_FILES+=("$_tmp")
         if cp "$extract_dir/scripts/$_bin.sh" "$_tmp" \
            && chmod 755 "$_tmp" \
            && mv -f "$_tmp" "$_local_bin/$_bin"; then
           echo "  refreshed $_local_bin/$_bin"
         else
           rm -f "$_tmp" 2>/dev/null || true
-          echo "  ${YELLOW}WARN:${NC} failed to refresh $_local_bin/$_bin"
+          echo "  ${RED}Failed: $_local_bin/$_bin${NC}"
+          upgrade_failed=true
+          failed_artifacts+=("$_local_bin/$_bin")
         fi
       fi
     done
     unset _helper _bin _tmp _local_bin
   fi
 
-  # Refresh the managed ~/.zprofile PATH block (install.sh owns it; upgrade used
-  # to skip it). Best-effort — never flips upgrade_failed.
-  _refresh_zprofile_block "$extract_dir/install.sh"
+  if [[ -d "$extract_dir/config" ]]; then
+    mkdir -p "$DATA_DIR/config"
+    local _config
+    for _config in starship.toml profiles.conf; do
+      if [[ -f "$extract_dir/config/$_config" ]] \
+        && ! cp "$extract_dir/config/$_config" "$DATA_DIR/config/$_config"; then
+        echo "  ${RED}Failed: $DATA_DIR/config/$_config${NC}"
+        upgrade_failed=true
+        failed_artifacts+=("$DATA_DIR/config/$_config")
+      fi
+    done
+    unset _config
+  fi
+
+  # Block the version bump when refreshing the managed zprofile block fails.
+  if ! _refresh_zprofile_block "$extract_dir/install.sh"; then
+    upgrade_failed=true
+    failed_artifacts+=("$HOME/.zprofile")
+  fi
 
   # Cleanup temp dir
   rm -rf "$tmp_dir"
@@ -4141,7 +4054,17 @@ _self_upgrade() {
   # Only update version if all critical copies succeeded
   if [[ "$upgrade_failed" == true ]]; then
     echo ""
-    echo "${RED}❌ Upgrade incomplete - version not updated${NC}"
+    echo "${RED}❌ Upgrade incomplete — some artifacts updated, others failed (see above).${NC}"
+    if (( ${#failed_artifacts[@]} > 0 )); then
+      echo "  Failed artifacts:"
+      local _fa
+      for _fa in "${failed_artifacts[@]}"; do
+        echo "    - $_fa"
+      done
+    fi
+    echo "  Recorded version stays ${BLUE}$local_version${NC} (target was ${BLUE}$remote_version${NC})."
+    echo "  If the macsmith binary above reported 'Updated', it now runs $remote_version"
+    echo "  code while still reporting $local_version until a clean upgrade completes."
     echo "  Fix the errors above and run upgrade again."
     return 1
   fi
@@ -4158,9 +4081,7 @@ _self_upgrade() {
 }
 
 # ================================ DOCTOR ===================================
-# Diagnostic command for "my setup feels off" situations. Scans for the known
-# failure modes we've hit in the wild and prints prioritised findings with
-# actionable remediations. Read-only — never modifies anything.
+# Read-only diagnostics for common setup failures.
 doctor() {
   local issues=0
   local warnings=0
@@ -4184,11 +4105,7 @@ doctor() {
     _doctor_issue "/nix exists but no Nix binary — run 'uninstall-nix' to clean up"
   fi
 
-  # 3. Duplicate Starship installs (brew + non-brew).
-  # zsh's `command -v` doesn't support -a (bash extension), so listing all
-  # matches needs zsh-native `whence -pa` — which macsmith.sh is always run
-  # under (the shebang pins zsh). Previously `command -v -a` was silenced by
-  # 2>/dev/null, making this check a no-op.
+  # 3. List duplicate Starship installs with zsh-native whence.
   if command -v starship >/dev/null 2>&1; then
     local starship_paths
     starship_paths="$(whence -pa starship 2>/dev/null | sort -u)"
@@ -4202,9 +4119,7 @@ doctor() {
     fi
   fi
 
-  # 4. macsmith managed zshrc sanity — zsh.sh itself doesn't carry a marker,
-  # so we probe for a signature line instead (the alias-setup block that
-  # only macsmith's zsh.sh writes).
+  # 4. Identify managed zshrc files by their signature line.
   if [[ -f "$HOME/.zshrc" ]]; then
     if grep -q '^macsmith_bin=' "$HOME/.zshrc" 2>/dev/null; then
       _doctor_ok "\$HOME/.zshrc is macsmith-managed"
@@ -4225,7 +4140,16 @@ doctor() {
       ;;
   esac
 
-  # 6. chruby active but no Ruby?
+  # 6. Source chruby candidates before checking the active Ruby.
+  if ! type chruby >/dev/null 2>&1; then
+    [[ -f /usr/local/share/chruby/chruby.sh ]] && source /usr/local/share/chruby/chruby.sh 2>/dev/null || true
+    [[ -f "$HOME/.local/share/chruby/chruby.sh" ]] && source "$HOME/.local/share/chruby/chruby.sh" 2>/dev/null || true
+    if ! type chruby >/dev/null 2>&1; then
+      local brew_prefix="$(_detect_brew_prefix)"
+      [[ -n "$brew_prefix" && -f "$brew_prefix/opt/chruby/share/chruby/chruby.sh" ]] \
+        && source "$brew_prefix/opt/chruby/share/chruby/chruby.sh" 2>/dev/null || true
+    fi
+  fi
   if type chruby >/dev/null 2>&1 && ! command -v ruby >/dev/null 2>&1; then
     _doctor_issue "chruby loaded but no Ruby available — run 'update ruby' or 'dev-tools'"
   fi
@@ -4270,10 +4194,7 @@ doctor() {
 }
 
 # ================================ UNINSTALL-PROFILE ========================
-# brew-uninstall the formulae and casks that install.sh's sysadmin profiles
-# added. Keep these lists in sync with install.sh's install_sysadmin_tools()
-# (no shared source — macsmith runs standalone from ~/.local/bin and can't
-# source the repo's install.sh at runtime).
+# Brew-uninstall packages from the same manifest used by install.sh.
 uninstall_profile() {
   local profile="${1:-}"
   if [[ -z "$profile" ]] || [[ "$profile" == "help" ]] || [[ "$profile" == "-h" ]] || [[ "$profile" == "--help" ]]; then
@@ -4281,17 +4202,7 @@ uninstall_profile() {
 Usage: macsmith uninstall-profile <name>
 
 Valid profiles:
-  power-user   btop, dust, ripgrep, bat, eza, fd, zoxide, jq, yq,
-               tree, tlrc, watch, gh, lazygit, mtr, bandwhich, direnv,
-               shellcheck, shfmt, pre-commit, tmux, neovim, chezmoi,
-               tw93/tap/mole
-  crypto       age, sops, gnupg, pinentry-mac
-  netsec       nmap, masscan, iperf3, wireshark-app (cask)
-  devops       kubernetes-cli, helm, k9s, kubectx, kustomize, stern,
-               hashicorp/tap/terraform, terragrunt, tflint, ansible, awscli, azure-cli,
-               doctl, argocd, skaffold, docker, docker-compose,
-               google-cloud-sdk/orbstack/multipass (casks)
-  databases    mysql, postgresql@17
+  power-user, crypto, netsec, devops, databases
 
 Uninstalls via 'brew uninstall'. Skips formulae that aren't installed.
 Does NOT touch your data (MySQL dumps, postgres clusters, Docker volumes, …).
@@ -4306,30 +4217,21 @@ EOF
 
   local formulae=()
   local casks=()
-  case "$profile" in
-    power-user)
-      formulae=(btop dust ripgrep bat eza fd zoxide jq yq tree tlrc watch gh lazygit mtr bandwhich direnv shellcheck shfmt pre-commit tmux neovim chezmoi tw93/tap/mole)
-      ;;
-    crypto)
-      formulae=(age sops gnupg pinentry-mac)
-      ;;
-    netsec)
-      formulae=(nmap masscan iperf3)
-      casks=(wireshark-app)
-      ;;
-    devops)
-      formulae=(kubernetes-cli helm k9s kubectx kustomize stern hashicorp/tap/terraform terragrunt tflint ansible awscli azure-cli doctl argocd skaffold docker docker-compose)
-      casks=(google-cloud-sdk orbstack multipass)
-      ;;
-    databases)
-      formulae=(mysql postgresql@17)
-      ;;
-    *)
-      echo "${RED}unknown profile:${NC} $profile"
-      echo "Try: macsmith uninstall-profile help"
-      return 2
-      ;;
-  esac
+  local profile_manifest="$DATA_DIR/config/profiles.conf"
+  if [[ ! -f "$profile_manifest" ]]; then
+    echo "${RED}[error]${NC} Profile manifest missing: $profile_manifest"
+    echo "Run 'macsmith upgrade' or 'sys-install' to restore it."
+    return 1
+  fi
+  if ! awk -F'|' -v profile="$profile" '$1 == profile { found=1 } END { exit !found }' "$profile_manifest"; then
+    echo "${RED}unknown profile:${NC} $profile"
+    echo "Try: macsmith uninstall-profile help"
+    return 2
+  fi
+  # shellcheck disable=SC2296
+  formulae=("${(@f)$(awk -F'|' -v profile="$profile" '$1 == profile && $2 == "formula" { print $3 }' "$profile_manifest")}")
+  # shellcheck disable=SC2296
+  casks=("${(@f)$(awk -F'|' -v profile="$profile" '$1 == profile && $2 == "cask" { print $3 }' "$profile_manifest")}")
 
   echo "${YELLOW}About to uninstall $profile profile:${NC}"
   (( ${#formulae[@]} > 0 )) && echo "  formulae: ${formulae[*]}"
@@ -4379,60 +4281,94 @@ EOF
     printf ", %d failed: %s" "${#failed[@]}" "${failed[*]}"
   fi
   echo ""
+  (( ${#failed[@]} > 0 )) && return 1
   return 0
 }
 
 # ================================ MAIN =====================================
-# Concurrent-run protection.
-# Keep the lock in our private data dir, not world-writable /tmp, so a local
-# attacker can't pre-plant a symlink at a predictable /tmp path and redirect
-# the `echo $$ >` write to clobber an arbitrary user-writable file.
-mkdir -p "$DATA_DIR" 2>/dev/null || true
-LOCK_FILE="$DATA_DIR/maintain.lock"
-if [[ -f "$LOCK_FILE" ]]; then
+# Lock mutating commands inside the private data directory.
+LOCK_FILE=""
+case "${1:-}" in
+  update|upgrade|self-update|install|dev-tools|uninstall-profile)
+    mkdir -p "$DATA_DIR" 2>/dev/null || {
+      echo "ERROR: Could not create $DATA_DIR" >&2
+      exit 1
+    }
+    chmod 700 "$DATA_DIR" 2>/dev/null || true
+    LOCK_FILE="$DATA_DIR/maintain.lock"
+    ;;
+esac
+# Acquire the lock atomically and remove it only for dead owners.
+while [[ -n "$LOCK_FILE" ]] && ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; do
   lock_pid=""
-  lock_pid="$(<"$LOCK_FILE")"
+  lock_pid="$(<"$LOCK_FILE" 2>/dev/null)"
   if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
     echo "ERROR: Another instance of macsmith is already running (PID $lock_pid)"
     echo "  If this is a mistake, remove the lock file: rm $LOCK_FILE"
     exit 1
   fi
-  rm -f "$LOCK_FILE"
-fi
-echo $$ > "$LOCK_FILE"
-# Tracks the self-upgrade temp dir so the script-level cleanup removes it.
-# _self_upgrade no longer installs its own EXIT/INT trap (which fired on
-# function return and shadowed the Ctrl-C-aborts-the-run handler below).
+  [[ -n "$LOCK_FILE" ]] && rm -f "$LOCK_FILE"
+done
+# Track the self-upgrade directory for script-level cleanup.
 _UPGRADE_TMP_DIR=""
-# Tempfiles written next to their targets during _self_upgrade (.macsmith.tmp.$$,
-# .zshrc.tmp.$$). Tracked here so a Ctrl-C between write and `mv -f` doesn't leave
-# orphaned dotfiles in ~/.local/bin and $HOME.
+# Track destination-side upgrade temporary files for cleanup.
 _UPGRADE_TMP_FILES=()
 # shellcheck disable=SC2329  # invoked via trap below (shellcheck can't track it in this large zsh file)
 _cleanup_lock() {
-  rm -f "$LOCK_FILE"
+  # Keep cleanup idempotent across signal and EXIT traps.
+  [[ -n "${_CLEANUP_DONE:-}" ]] && return 0
+  _CLEANUP_DONE=1
+  [[ -n "$LOCK_FILE" ]] && rm -f "$LOCK_FILE"
   [[ -n "$_UPGRADE_TMP_DIR" ]] && rm -rf "$_UPGRADE_TMP_DIR"
   (( ${#_UPGRADE_TMP_FILES[@]} )) && rm -f "${_UPGRADE_TMP_FILES[@]}"
 }
-# Ctrl-C must abort the WHOLE run, not just the current sub-step. A plain
-# `trap 'rm -f lock' INT` (the old form) cleaned the lock but did not exit, so
-# in zsh the script continued to the next update section after each ^C —
-# `update` would grind through every language toolchain even though the user
-# was hammering Ctrl-C. Mirror install.sh/dev-tools.sh: re-raise SIGINT to $$
-# so the default action terminates the process (and the parent shell sees the
-# cancel). The EXIT trap still removes the lock.
+# Re-raise SIGINT after cleanup so Ctrl-C aborts the complete run.
 # shellcheck disable=SC2329  # invoked via trap below (shellcheck can't track it in this large zsh file)
 _on_interrupt() {
   trap - INT
   _cleanup_lock
   kill -INT $$
 }
-trap _cleanup_lock EXIT TERM HUP
+# Re-raise termination signals after cleanup to preserve their status.
+# shellcheck disable=SC2329  # invoked via trap below (shellcheck can't track it in this large zsh file)
+_on_term() {
+  trap - TERM HUP EXIT
+  _cleanup_lock
+  kill -TERM $$
+}
+trap _cleanup_lock EXIT
 trap _on_interrupt INT
+trap '_on_term' TERM HUP
 
-# Dispatch based on command argument. For subcommands that accept arguments
-# (update target, uninstall-profile name), forward "${@:2}" so positional
-# args reach the function.
+_print_main_help() {
+  echo "Usage: macsmith <command> [args]"
+  echo ""
+  echo "Commands:"
+  echo "  update [target]     - Update everything (default) or a specific target"
+  echo "                        (try: macsmith update help)"
+  echo "  verify              - Verify installed tools and their versions"
+  echo "  versions            - Display detailed version info for all tools"
+  echo "  doctor              - Diagnose common setup issues (read-only)"
+  echo "  upgrade             - Update macsmith itself (checksum + provenance verified)"
+  echo "  install             - Re-run install.sh (tweak profiles, pick up core updates)"
+  echo "  dev-tools           - Re-run dev-tools.sh (add/remove language toolchains)"
+  echo "  uninstall-profile X - Brew-uninstall a sysadmin profile's packages"
+  echo "                        (try: macsmith uninstall-profile help)"
+  echo ""
+  echo "Optional environment variables:"
+  echo "  MACSMITH_FIX_RUBY_GEMS=0|disabled    Disable Ruby gem auto-fix (on by default)"
+  echo "  MACSMITH_CLEAN_PYENV=1               Opt in to pruning old pyenv versions (MACSMITH_PYENV_KEEP=...)"
+  echo "  MACSMITH_CLEAN_NVM=1                 Opt in to pruning old Node versions (MACSMITH_NVM_KEEP=...)"
+  echo "  MACSMITH_CLEAN_CHRUBY=1              Opt in to pruning old chruby rubies (MACSMITH_CHRUBY_KEEP=...)"
+  echo "  MACSMITH_SWIFT_SNAPSHOTS=1           Enable Swift development snapshot updates"
+  echo "  MACSMITH_UPDATE_CHECK=1              Opt in to shell-startup update check (off by default)"
+  echo "  MACSMITH_ALLOW_CHECKSUM_ONLY_UPGRADE=1  Allow upgrade without provenance verification"
+  echo "  MACSMITH_ALLOW_UNSIGNED_UPGRADE=1    Opt in to upgrade from unsigned GitHub zipball"
+  echo "  MACSMITH_ALLOW_PROJECT_MODIFY=1      Opt in to running update from a project directory"
+  echo "  MACSMITH_UPDATE_WORKDIR=DIR          Safe working directory for update package-manager calls"
+}
+
+# Dispatch the command and forward remaining positional arguments.
 case "${1:-}" in
   update)
     update "${@:2}"
@@ -4470,32 +4406,13 @@ case "${1:-}" in
   uninstall-profile)
     uninstall_profile "${@:2}"
     ;;
+  help|-h|--help|"")
+    _print_main_help
+    ;;
   *)
-    echo "Usage: macsmith <command> [args]"
-    echo ""
-    echo "Commands:"
-    echo "  update [target]     - Update everything (default) or a specific target"
-    echo "                        (try: macsmith update help)"
-    echo "  verify              - Verify installed tools and their versions"
-    echo "  versions            - Display detailed version info for all tools"
-    echo "  doctor              - Diagnose common setup issues (read-only)"
-    echo "  upgrade             - Update macsmith itself from GitHub (SHA-256 verified)"
-    echo "  install             - Re-run install.sh (tweak profiles, pick up core updates)"
-    echo "  dev-tools           - Re-run dev-tools.sh (add/remove language toolchains)"
-    echo "  uninstall-profile X - Brew-uninstall a sysadmin profile's packages"
-    echo "                        (try: macsmith uninstall-profile help)"
-    echo ""
-    echo "Optional environment variables:"
-    echo "  MACSMITH_FIX_RUBY_GEMS=0|disabled    Disable Ruby gem auto-fix (on by default)"
-    echo "  MACSMITH_CLEAN_PYENV=1               Opt in to pruning old pyenv versions (MACSMITH_PYENV_KEEP=...)"
-    echo "  MACSMITH_CLEAN_NVM=1                 Opt in to pruning old Node versions (MACSMITH_NVM_KEEP=...)"
-    echo "  MACSMITH_CLEAN_CHRUBY=1              Opt in to pruning old chruby rubies (MACSMITH_CHRUBY_KEEP=...)"
-    echo "  MACSMITH_SWIFT_SNAPSHOTS=1           Enable Swift development snapshot updates"
-    echo "  MACSMITH_UPDATE_CHECK=1              Opt in to shell-startup update check (off by default)"
-    echo "  MACSMITH_ALLOW_UNSIGNED_UPGRADE=1    Opt in to upgrade from unsigned GitHub zipball"
-    echo "  MACSMITH_ALLOW_PROJECT_MODIFY=1      Opt in to running update from a project directory"
-    echo "  MACSMITH_UPDATE_WORKDIR=DIR          Safe working directory for update package-manager calls"
-    exit 1
+    echo "${RED}Unknown command:${NC} $1" >&2
+    echo "Run 'macsmith --help' for usage." >&2
+    exit 2
     ;;
 esac
 

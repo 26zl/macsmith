@@ -9,8 +9,8 @@ Run these before opening a PR:
 ```bash
 ./quick-test.sh
 zsh -n bootstrap.sh install.sh dev-tools.sh macsmith.sh zsh.sh
-zsh -n scripts/nix-macos-maintenance.sh
-bash -n scripts/uninstall-nix-macos.sh scripts/uninstall-macsmith.sh quick-test.sh
+bash -n scripts/nix-macos-maintenance.sh scripts/uninstall-nix-macos.sh scripts/uninstall-macsmith.sh
+zsh -n quick-test.sh tests/*.zsh
 # ShellCheck — same flags + exclusion list CI uses (checks.yml). Outputs nothing on a clean tree.
 shellcheck -s bash -S info \
   -e SC1090,SC1091,SC2148,SC3010,SC3030,SC3043,SC3054,SC3024,SC3014,SC3006,SC3018,SC3011,SC3001,SC3046,SC3060,SC2139,SC2155,SC2207,SC2034,SC2012,SC2162 \

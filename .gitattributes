@@ -35,14 +35,14 @@ LICENSE          text eol=lf
 
 # GitHub language stats: don't count these as "the" language
 *.md         linguist-documentation
-CLAUDE.md    linguist-documentation
 background/* linguist-vendored
 
 # Release/export hygiene — don't ship dev files in release zipball
 .github/        export-ignore
 .vscode/        export-ignore
-.claude/        export-ignore
 .gitattributes  export-ignore
 .gitignore      export-ignore
 quick-test.sh   export-ignore
-CLAUDE.md       export-ignore
+tests/          export-ignore
+background/     export-ignore
+"Ghostty config.txt" export-ignore

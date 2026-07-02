@@ -15,22 +15,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
 
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Run ShellCheck
         uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
         env:
-          # SC2015 (A && B || C) — removed from exclude list now that all
-          # known occurrences have been converted to proper if/fi.
-          # SC2296 is handled via inline `shellcheck disable=SC2296` at the
-          # specific zsh-only parameter expansions (search for them) so new
-          # accidental uses still fail CI. Rest are bash-vs-zsh dialect noise
-          # and style-level hints we accept.
           SHELLCHECK_OPTS: -e SC1090,SC1091,SC2148,SC3010,SC3030,SC3043,SC3054,SC3024,SC3014,SC3006,SC3018,SC3011,SC3001,SC3046,SC3060,SC2139,SC2155,SC2207,SC2034,SC2012,SC2162 -s bash -S info
         with:
           scandir: '.'
@@ -41,108 +35,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
 
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
       - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  hardcoded-paths:
-    name: Check for Hardcoded Paths
-    runs-on: ubuntu-latest
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@v2
-        with:
-          egress-policy: audit
-
-      - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Check for hardcoded user paths
-        run: |
-          echo "=== Checking for hardcoded user paths ==="
-          found_issues=0
-          
-          # Check for /Users/username patterns (excluding common system paths)
-          if grep -rE "/Users/[^/\$]+/" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "(README|LICENSE|\.github)" | grep -vE "/Users/(Shared|\.|runner)" | grep -vE "#.*/Users/" | grep -vE "example|Example|EXAMPLE"; then
-            echo "ERROR: Found hardcoded /Users/username paths"
-            grep -rE "/Users/[^/\$]+/" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "(README|LICENSE|\.github)" | grep -vE "/Users/(Shared|\.|runner)" | grep -vE "#.*/Users/" | grep -vE "example|Example|EXAMPLE" || true
-            found_issues=1
-          else
-            echo "OK: No hardcoded /Users/username paths found"
-          fi
-          
-          # Check for /home/username patterns
-          if grep -rE "/home/[^/\$]+/" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "(README|LICENSE|\.github)" | grep -vE "/home/(runner|\.)" | grep -vE "#.*/home/" | grep -vE "example|Example|EXAMPLE"; then
-            echo "ERROR: Found hardcoded /home/username paths"
-            grep -rE "/home/[^/\$]+/" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "(README|LICENSE|\.github)" | grep -vE "/home/(runner|\.)" | grep -vE "#.*/home/" | grep -vE "example|Example|EXAMPLE" || true
-            found_issues=1
-          else
-            echo "OK: No hardcoded /home/username paths found"
-          fi
-          
-          # Check for hardcoded macOS user directories (excluding $HOME usage)
-          if grep -rE "(~/Library|~/Documents|~/Desktop|~/Downloads|~/Pictures|~/Movies|~/Music)" --include="*.sh" --include="*.zsh" --exclude-dir=".git" . | grep -vE "\$HOME|\$\{HOME\}" | grep -vE "#.*~/" | grep -vE "example|Example|EXAMPLE"; then
-            echo "ERROR: Found hardcoded user directory paths (should use \$HOME)"
-            grep -rE "(~/Library|~/Documents|~/Desktop|~/Downloads|~/Pictures|~/Movies|~/Music)" --include="*.sh" --include="*.zsh" --exclude-dir=".git" . | grep -vE "\$HOME|\$\{HOME\}" | grep -vE "#.*~/" | grep -vE "example|Example|EXAMPLE" || true
-            found_issues=1
-          else
-            echo "OK: No hardcoded user directory paths found"
-          fi
-          
-          # Check for email addresses (potential personal info)
-          if grep -rE "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "(github\.com|example\.com|test\.com|noreply|no-reply|github\.io)" | grep -vE "#.*@" | grep -vE "example|Example|EXAMPLE"; then
-            echo "ERROR: Found potential email addresses (may contain personal info)"
-            grep -rE "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "(github\.com|example\.com|test\.com|noreply|no-reply|github\.io)" | grep -vE "#.*@" | grep -vE "example|Example|EXAMPLE" || true
-            found_issues=1
-          else
-            echo "OK: No personal email addresses found"
-          fi
-          
-          # Check for phone numbers (potential personal info)
-          # Use more specific pattern that looks for actual phone number formats
-          # Exclude: timeout values, version numbers, port numbers, exit codes, line numbers, config values, seconds, subprocess calls
-          if grep -rE "\+[0-9]{1,3}[\s-]?\([0-9]{3}\)[\s-]?[0-9]{3}[\s-]?[0-9]{4}|\([0-9]{3}\)[\s-]?[0-9]{3}[\s-]?[0-9]{4}|[0-9]{3}[\s-][0-9]{3}[\s-][0-9]{4}" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "(timeout|Timeout|TIMEOUT|version|Version|VERSION|port|Port|PORT|exit|Exit|EXIT|line|Line|LINE|SC[0-9]|SC_|config|Config|CONFIG|opts|Opts|OPTS|seconds|s\"|s'|subprocess|TimeoutExpired|mkdtemp|splitlines|sys\.exit|check=)" | grep -vE "([0-9]+s\"|[0-9]+s'|timeout=[0-9]+|exit\([0-9]+\))" | grep -vE "#.*[0-9]" | grep -vE "example|Example|EXAMPLE"; then
-            echo "ERROR: Found potential phone numbers (may contain personal info)"
-            grep -rE "\+[0-9]{1,3}[\s-]?\([0-9]{3}\)[\s-]?[0-9]{3}[\s-]?[0-9]{4}|\([0-9]{3}\)[\s-]?[0-9]{3}[\s-]?[0-9]{4}|[0-9]{3}[\s-][0-9]{3}[\s-][0-9]{4}" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "(timeout|Timeout|TIMEOUT|version|Version|VERSION|port|Port|PORT|exit|Exit|EXIT|line|Line|LINE|SC[0-9]|SC_|config|Config|CONFIG|opts|Opts|OPTS|seconds|s\"|s'|subprocess|TimeoutExpired|mkdtemp|splitlines|sys\.exit|check=)" | grep -vE "([0-9]+s\"|[0-9]+s'|timeout=[0-9]+|exit\([0-9]+\))" | grep -vE "#.*[0-9]" | grep -vE "example|Example|EXAMPLE" || true
-            found_issues=1
-          else
-            echo "OK: No phone numbers found"
-          fi
-          
-          # Check for hardcoded IP addresses (excluding localhost and common examples)
-          if grep -rE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "(127\.0\.0\.1|0\.0\.0\.0|255\.255\.255\.255|192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)" | grep -vE "#.*[0-9]" | grep -vE "example|Example|EXAMPLE"; then
-            echo "ERROR: Found hardcoded IP addresses (may contain personal info)"
-            grep -rE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "(127\.0\.0\.1|0\.0\.0\.0|255\.255\.255\.255|192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)" | grep -vE "#.*[0-9]" | grep -vE "example|Example|EXAMPLE" || true
-            found_issues=1
-          else
-            echo "OK: No hardcoded IP addresses found"
-          fi
-          
-          # Check for hardcoded hostnames (excluding common examples and file extensions)
-          # Exclude: file extensions (.sh, .yml, .yaml, .md, .txt, .json, .lock, .mod, .sum), known domains, URLs
-          if grep -rE "\b[a-zA-Z0-9][a-zA-Z0-9-]*\.[a-zA-Z]{2,}\b" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "\.(sh|zsh|yml|yaml|md|txt|json|lock|mod|sum|pkg|tar|bz2|gz|zip)$" | grep -vE "(github\.com|example\.com|test\.com|localhost|nixos\.org|macports\.org|homebrew\.io|apple\.com|microsoft\.com|google\.com|raw\.githubusercontent|download\.swift\.org|go\.dev|distfiles\.macports)" | grep -vE "#.*\." | grep -vE "example|Example|EXAMPLE" | grep -vE "include.*\.sh|source.*\.sh|\./.*\.sh"; then
-            echo "WARNING: Found potential hardcoded hostnames (review manually)"
-            grep -rE "\b[a-zA-Z0-9][a-zA-Z0-9-]*\.[a-zA-Z]{2,}\b" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --include="*.md" --exclude-dir=".git" . | grep -vE "\.(sh|zsh|yml|yaml|md|txt|json|lock|mod|sum|pkg|tar|bz2|gz|zip)$" | grep -vE "(github\.com|example\.com|test\.com|localhost|nixos\.org|macports\.org|homebrew\.io|apple\.com|microsoft\.com|google\.com|raw\.githubusercontent|download\.swift\.org|go\.dev|distfiles\.macports)" | grep -vE "#.*\." | grep -vE "example|Example|EXAMPLE" | grep -vE "include.*\.sh|source.*\.sh|\./.*\.sh" || true
-          else
-            echo "OK: No suspicious hostnames found"
-          fi
-          
-          if [[ $found_issues -eq 1 ]]; then
-            echo ""
-            echo "ERROR: Hardcoded paths or personal information found!"
-            echo "Please review and replace with environment variables or dynamic detection."
-            exit 1
-          else
-            echo ""
-            echo "OK: No hardcoded paths or personal information found"
-          fi

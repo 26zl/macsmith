@@ -4,7 +4,7 @@
 # URL on a fetch line and fails CI if it is not listed here. Adding a new
 # remote-code-execution or download source therefore REQUIRES adding it here in
 # the same PR — that line is the review checkpoint. Match must be exact (the URL
-# as written in source, including ${vars} and HEAD), so a reformatted installer
+# as written in source, including ${vars}), so a reformatted installer
 # URL also triggers review.
 #
 # Blank lines and lines starting with # are ignored.
@@ -13,16 +13,20 @@
 https://raw.githubusercontent.com/26zl/macsmith/main/bootstrap.sh
 https://api.github.com/repos/26zl/macsmith/releases/latest
 https://api.github.com/repos/$GITHUB_REPO/releases/latest
+https://github.com/${GITHUB_REPO}/releases/download/${remote_version}/${expected_asset}
+# bootstrap.sh: REPO_URL="${MACSMITH_REPO:-https://github.com/26zl/macsmith.git}"
+# (extracted including the trailing brace from the ${var:-default} form)
+https://github.com/26zl/macsmith.git}
 
 # --- toolchain installers (remote code execution — highest scrutiny) ---
-https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh
+https://raw.githubusercontent.com/Homebrew/install/${brew_commit}/install.sh
 https://raw.githubusercontent.com/nvm-sh/nvm/${nvm_version}/install.sh
 https://sh.rustup.rs
 https://nixos.org/nix/install
 
 # --- package/version downloads (data, not piped to a shell) ---
-https://api.github.com/repos/nvm-sh/nvm/releases/latest
 https://distfiles.macports.org/MacPorts/
+https://distfiles.macports.org/MacPorts/${macports_tarball}
 https://download.swift.org/swiftly/darwin/swiftly.pkg
 https://go.dev/dl/?mode=json
 

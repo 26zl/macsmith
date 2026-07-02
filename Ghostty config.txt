@@ -22,8 +22,8 @@ background = #000000
 background-opacity = 0.75
 
 # --- Background image ---
-# Ghostty does NOT expand ~ or $HOME in config files — replace with your
-# absolute path, e.g. /Users/yourname/.config/ghostty/terminal-background.png
+# Replace CHANGE_ME because Ghostty requires an absolute background-image path:
+#   sed -i '' "s|/Users/CHANGE_ME|$HOME|" ~/.config/ghostty/config
 background-image = /Users/CHANGE_ME/.config/ghostty/terminal-background.png
 background-image-opacity = 0.85
 background-image-fit = cover
@@ -31,7 +31,7 @@ background-image-position = center
 background-image-repeat = false
 
 # --- Blur ---
-background-blur-radius = 20
+background-blur = 20
 
 # --- Window layout ---
 window-padding-x = 12

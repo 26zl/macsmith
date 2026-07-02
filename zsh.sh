@@ -144,16 +144,32 @@ if command -v chruby >/dev/null 2>&1; then
   fi
 fi
 _setup_gem_path() {
+  # Preserve chruby's gem paths when RUBY_ROOT is active.
+  [[ -n "${RUBY_ROOT:-}" ]] && return 0
   if ! command -v ruby >/dev/null 2>&1; then return 0; fi
   # Cache key: skip if ruby path hasn't changed since last check
   local current_ruby_path
   current_ruby_path="$(command -v ruby 2>/dev/null)"
   if [[ "$current_ruby_path" == "${_gem_path_last_ruby:-}" ]]; then return 0; fi
   _gem_path_last_ruby="$current_ruby_path"
-  local engine api
-  engine=$(ruby -e 'print defined?(RUBY_ENGINE) ? RUBY_ENGINE : "ruby"' 2>/dev/null)
-  api=$(ruby -e 'require "rbconfig"; print RbConfig::CONFIG["ruby_version"]' 2>/dev/null)
-  [[ -z "$engine" || -z "$api" ]] && return 0
+  local engine="" api=""
+  # Cache gem metadata by Ruby binary path to avoid repeated subprocesses.
+  local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/macsmith"
+  local cache_file="$cache_dir/gem-path"
+  if [[ -r "$cache_file" ]]; then
+    local _cp="" _ce="" _ca=""
+    IFS=$'\t' read -r _cp _ce _ca < "$cache_file"
+    if [[ "$_cp" == "$current_ruby_path" && -n "$_ce" && -n "$_ca" ]]; then
+      engine="$_ce"; api="$_ca"
+    fi
+  fi
+  if [[ -z "$engine" || -z "$api" ]]; then
+    engine=$(ruby -e 'print defined?(RUBY_ENGINE) ? RUBY_ENGINE : "ruby"' 2>/dev/null)
+    api=$(ruby -e 'require "rbconfig"; print RbConfig::CONFIG["ruby_version"]' 2>/dev/null)
+    [[ -z "$engine" || -z "$api" ]] && return 0
+    mkdir -p "$cache_dir" 2>/dev/null || true
+    printf '%s\t%s\t%s\n' "$current_ruby_path" "$engine" "$api" > "$cache_file" 2>/dev/null || true
+  fi
   export GEM_HOME="$HOME/.gem/$engine/$api"
   export GEM_PATH="$GEM_HOME"
   _add_to_path "$GEM_HOME/bin"
@@ -193,14 +209,16 @@ if command -v pyenv >/dev/null 2>&1; then
           found_python="$python_dir/python3"
         # Then try to find highest python3.x version dynamically
         else
-          # Use globbing to find python3.x versions
-          local python_versions=()
+          # Use local null_glob and local variables to keep unmatched versions out of the interactive shell.
+          setopt local_options null_glob
+          local python_versions=() f="" sorted=()
           for f in "$python_dir"/python3.[0-9]*; do
             [[ -f "$f" && "$f" =~ python3\.[0-9]+$ ]] && python_versions+=("$f")
           done
           if [[ ${#python_versions[@]} -gt 0 ]]; then
-            # Sort versions and get the highest
-            IFS=$'\n' sorted=($(sort -V <<<"${python_versions[*]}"))
+            # Join and split with zsh flags to sort versions without changing IFS.
+            # shellcheck disable=SC2296  # ${(F)...}/${(@f)...} are valid zsh expansions
+            sorted=("${(@f)$(sort -V <<<"${(F)python_versions}")}")
             found_python="${sorted[-1]}"
           fi
         fi
@@ -215,19 +233,6 @@ if command -v pyenv >/dev/null 2>&1; then
         fi
       fi
       export PIPX_DEFAULT_PYTHON="$resolved_python"
-      
-      # Create 'python' symlink in pyenv version (needed for pipx)
-      local current_version=$(pyenv version-name 2>/dev/null || echo "")
-      if [[ -n "$current_version" && "$current_version" != "system" ]]; then
-        local pyenv_bin_dir="$PYENV_ROOT/versions/$current_version/bin"
-        if [[ -d "$pyenv_bin_dir" || -L "$pyenv_bin_dir" ]]; then
-          # Resolve symlink to actual bin directory
-          local actual_bin_dir=$(cd -P "$pyenv_bin_dir" 2>/dev/null && pwd)
-          if [[ -n "$actual_bin_dir" && -f "$actual_bin_dir/python3" && ! -f "$actual_bin_dir/python" ]]; then
-            ln -sf python3 "$actual_bin_dir/python" 2>/dev/null || true
-          fi
-        fi
-      fi
     fi
   }
   _set_pipx_python
@@ -235,12 +240,7 @@ if command -v pyenv >/dev/null 2>&1; then
 fi
 
 # ================================== nvm ====================================
-# Lazy load NVM to speed up shell startup
-# NVM is only sourced when nvm, node, or npm is actually invoked.
-# The lazy-load body is inlined into every shim — a shared helper function
-# can mysteriously vanish from long-lived persistent subshells (e.g. some
-# editor/agent embedded shells), leaving the shims calling a non-existent
-# helper. Inlining keeps each shim self-contained.
+# Inline self-contained NVM lazy loading into each Node command shim.
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 
 nvm() {
@@ -291,7 +291,7 @@ go_bin="${GOPATH:-$HOME/go}/bin"
 # ================================ conda/miniforge ===========================
 # Initialize conda/miniforge if installed but not already in PATH
 if ! command -v conda >/dev/null 2>&1; then
-  HOMEBREW_PREFIX="$(_detect_brew_prefix)"
+  [[ -n "${HOMEBREW_PREFIX:-}" ]] || HOMEBREW_PREFIX="$(_detect_brew_prefix)"
   conda_paths=(
     "$HOME/miniforge3/bin/conda"
     "$HOME/miniforge/bin/conda"
@@ -349,19 +349,15 @@ fi
 
 # MySQL aliases - detect MySQL installation dynamically
 _detect_mysql_path() {
-  # Check common MySQL installation locations
-  local mysql_paths=()
+  # Keep the loop's `path` local because zsh ties the global variable to PATH.
+  local mysql_paths=() path=""
   
-  # Only check Homebrew paths if brew is available
-  if command -v brew >/dev/null 2>&1; then
-    local brew_prefix
-    brew_prefix=$(brew --prefix 2>/dev/null || echo "")
-    if [[ -n "$brew_prefix" ]]; then
-      mysql_paths+=(
-        "$brew_prefix/opt/mysql/support-files/mysql.server"
-        "$brew_prefix/opt/mariadb/support-files/mysql.server"
-      )
-    fi
+  # Reuse the Homebrew prefix computed at startup.
+  if [[ -n "${HOMEBREW_PREFIX:-}" ]]; then
+    mysql_paths+=(
+      "$HOMEBREW_PREFIX/opt/mysql/support-files/mysql.server"
+      "$HOMEBREW_PREFIX/opt/mariadb/support-files/mysql.server"
+    )
   fi
   
   # Add standard system paths
@@ -413,12 +409,11 @@ _detect_openjdk_path() {
   
   # Check versioned openjdk paths (openjdk@17, openjdk@21, etc.)
   if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -d "$HOMEBREW_PREFIX/opt" ]]; then
-    # Use glob expansion to find all openjdk@* versions
-    # Use a loop for maximum compatibility and to avoid ShellCheck issues with glob qualifiers
-    local result=""
+    # Use local null_glob and a local `path` variable when scanning versioned OpenJDK directories.
+    setopt local_options null_glob
+    local result="" path=""
     for path in "$HOMEBREW_PREFIX"/opt/openjdk@*/bin; do
-      # Check if glob matched an actual directory (not literal string)
-      if [[ -d "$path" ]] && [[ "$path" != *"openjdk@*/bin" ]]; then
+      if [[ -d "$path" ]]; then
         result="$path"
         break
       fi
@@ -462,10 +457,7 @@ if [[ -x "$macsmith_bin" ]]; then
   alias doctor="$macsmith_bin doctor"
   alias uninstall-profile="$macsmith_bin uninstall-profile"
 fi
-# Standalone uninstallers shipped with macsmith. Installed by install.sh
-# to ~/.local/bin/ so aliases work even after the bootstrap temp clone is
-# wiped. `uninstall-nix` removes Nix cleanly; `uninstall-macsmith` removes
-# what macsmith itself installed (keeping Homebrew and language toolchains).
+# Alias the standalone uninstallers installed in ~/.local/bin.
 uninstall_nix_bin="$HOME/.local/bin/uninstall-nix-macos"
 if [[ -x "$uninstall_nix_bin" ]]; then
   alias uninstall-nix="$uninstall_nix_bin"
@@ -482,11 +474,8 @@ if [[ -f "$HOME/.swiftly/env.sh" ]]; then
 fi
 
 # ================================ FZF ======================================
-# Source fzf key-bindings + completions directly from Homebrew so users don't
-# have to run $(brew --prefix)/opt/fzf/install manually. Falls back to the
-# legacy ~/.fzf.zsh / $XDG_CONFIG_HOME path for users who already ran the
-# fzf installer themselves.
-HOMEBREW_PREFIX="$(_detect_brew_prefix)"
+# Load FZF from Homebrew with fallbacks for existing user installs.
+[[ -n "${HOMEBREW_PREFIX:-}" ]] || HOMEBREW_PREFIX="$(_detect_brew_prefix)"
 if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -d "$HOMEBREW_PREFIX/opt/fzf/shell" ]]; then
   [[ -f "$HOMEBREW_PREFIX/opt/fzf/shell/key-bindings.zsh" ]] && \
     source "$HOMEBREW_PREFIX/opt/fzf/shell/key-bindings.zsh"
@@ -499,10 +488,7 @@ else
 fi
 
 # ================================ UPDATE CHECK =============================
-# Check for macsmith updates (async, max once per 24h).
-# Opt-in only: set MACSMITH_UPDATE_CHECK=1 to enable. Disabled by default
-# so shell startup doesn't silently call api.github.com.
-# Notification is deferred to first prompt via precmd hook to keep init clean.
+# Run the opt-in daily update check asynchronously and notify at the first prompt.
 if [[ "${MACSMITH_UPDATE_CHECK:-0}" == "1" ]]; then
   _macsmith_data="$HOME/.local/share/macsmith"
   # Defer notification to first prompt to keep init output clean
@@ -532,9 +518,9 @@ if [[ "${MACSMITH_UPDATE_CHECK:-0}" == "1" ]]; then
     [[ -f "$_macsmith_data/last-update-check" ]] && _last_check="$(<"$_macsmith_data/last-update-check")"
     _now="$(date +%s)"
     if (( _now - _last_check > 86400 )); then
+      # Stamp before spawning to prevent concurrent shells from repeating the request.
+      date +%s > "$_macsmith_data/last-update-check" 2>/dev/null || true
       (
-        # Always update timestamp to avoid retrying on every shell start
-        date +%s > "$_macsmith_data/last-update-check"
         _latest="$(curl --proto '=https' --tlsv1.2 -fsSL --max-time 5 https://api.github.com/repos/26zl/macsmith/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
         if [[ -n "$_latest" ]]; then
           echo "$_latest" > "$_macsmith_data/latest-remote-version"
@@ -547,16 +533,16 @@ if [[ "${MACSMITH_UPDATE_CHECK:-0}" == "1" ]]; then
 fi
 
 # ================================ FINAL PATH CLEANUP =======================
-# Clean PATH at the very end to catch any duplicates added by plugins or tools
-# Explicitly ensure Homebrew paths come first, then rebuild PATH.
+# Move Homebrew first without reordering the rest of PATH.
 # Wrapped in command grouping to suppress any stray variable output.
-HOMEBREW_PREFIX="$(_detect_brew_prefix)"
+[[ -n "${HOMEBREW_PREFIX:-}" ]] || HOMEBREW_PREFIX="$(_detect_brew_prefix)"
 if [[ -n "$HOMEBREW_PREFIX" ]]; then
   # Remove Homebrew paths from current PATH temporarily
   {
     cleaned_path=$(echo "$PATH" | tr ':' '\n' | grep -v "^$HOMEBREW_PREFIX/bin$" | grep -v "^$HOMEBREW_PREFIX/sbin$" | tr '\n' ':' | sed 's/:$//' 2>/dev/null)
     # Rebuild PATH with Homebrew first
-    export PATH="$HOMEBREW_PREFIX/bin:$HOMEBREW_PREFIX/sbin:$cleaned_path"
+    # Omit an empty trailing PATH segment because it represents the current directory.
+    export PATH="$HOMEBREW_PREFIX/bin:$HOMEBREW_PREFIX/sbin${cleaned_path:+:$cleaned_path}"
   } >/dev/null 2>&1
 else
   # No Homebrew, just clean normally
@@ -570,22 +556,13 @@ command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init zsh)"
 command -v direnv >/dev/null 2>&1 && eval "$(direnv hook zsh)"
 
 # ================================ STARSHIP PROMPT ==========================
-# Initialize Starship after all PATH manipulation so it can find tools, and
-# *before* the zsh plugins below. `starship init zsh` defines ZLE widgets for
-# prompt redraw; zsh-syntax-highlighting must wrap every existing widget, so it
-# has to be sourced last (after starship). Loading the plugins before starship
-# leaves its widgets unwrapped and causes intermittent prompt-redraw corruption
-# (stray characters, doubled prompt, misplaced cursor).
-# Fallback: if Starship isn't installed, leave the default zsh prompt.
+# Initialize Starship before plugins so syntax highlighting wraps every prompt widget.
 if command -v starship >/dev/null 2>&1; then
   eval "$(starship init zsh)"
 fi
 
 # ================================ ZSH PLUGINS ==============================
-# zsh-autosuggestions and zsh-syntax-highlighting, sourced directly from
-# Homebrew. Order is load-bearing: autosuggestions first, then
-# syntax-highlighting LAST so it can hook every ZLE widget defined above
-# (starship's and autosuggestions' included). Do not reorder.
+# Load autosuggestions before syntax highlighting so the latter wraps all ZLE widgets.
 if [[ -n "$HOMEBREW_PREFIX" ]]; then
   [[ -f "$HOMEBREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] && \
     source "$HOMEBREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh"

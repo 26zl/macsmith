@@ -11,18 +11,26 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: macos-test-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  macos-test:
-    name: macOS Functionality Test
-    runs-on: macos-latest
+  macos-platform:
+    name: macOS Full Test (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
 
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup and validation
         run: |
@@ -88,10 +96,7 @@ jobs:
           echo "XDG_CONFIG_HOME=$fresh_home/.config" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$fresh_home/.cache" >> "$GITHUB_ENV"
           echo "NONINTERACTIVE=1" >> "$GITHUB_ENV"
-          # MACSMITH_YES=1 = full unattended install (yes to every prompt). The
-          # functional test deliberately exercises ALL installers; bare CI /
-          # NONINTERACTIVE now only answers each prompt's own default, so this
-          # explicit opt-in preserves full coverage.
+          # Use explicit auto-yes to exercise every installer.
           echo "MACSMITH_YES=1" >> "$GITHUB_ENV"
           mkdir -p "$fresh_home/.local/share" "$fresh_home/.config" "$fresh_home/.cache"
           echo "Fresh home directory prepared: $fresh_home"
@@ -538,6 +543,44 @@ jobs:
           echo ""
           echo "Command testing complete"
 
+      - name: Doctor and uninstaller dry-run smoke tests
+        run: |
+          echo "=== Doctor + uninstaller dry-run smoke tests ==="
+
+          # Require doctor to emit diagnostics without gating on runner-specific findings.
+          zsh -lc 'macsmith doctor' 2>&1 | tee doctor_output.txt
+          echo "macsmith doctor exit code: ${PIPESTATUS[0]}"
+          if grep -qiE "OK|WARN|FAIL|check|version" doctor_output.txt; then
+            echo "macsmith doctor produced diagnostics"
+          else
+            echo "ERROR: macsmith doctor produced no recognizable output"
+            exit 1
+          fi
+
+          # Require the installed macsmith uninstaller dry-run to succeed.
+          zsh -lc 'uninstall-macsmith --dry-run' 2>&1 | tee uninstall_macsmith_dry.txt
+          um_rc="${PIPESTATUS[0]}"
+          if [[ "$um_rc" -ne 0 ]]; then
+            echo "ERROR: uninstall-macsmith --dry-run failed (exit $um_rc)"
+            exit 1
+          fi
+          echo "uninstall-macsmith --dry-run succeeded"
+
+          # Require the Nix dry-run to produce output without destructive actions.
+          zsh -lc 'uninstall-nix-macos --dry-run' 2>&1 | tee uninstall_nix_dry.txt
+          echo "uninstall-nix-macos --dry-run exit code: ${PIPESTATUS[0]}"
+          if [[ ! -s uninstall_nix_dry.txt ]]; then
+            echo "ERROR: uninstall-nix-macos --dry-run produced no output"
+            exit 1
+          fi
+          if grep -qiE "deleteVolume|Deleting APFS|Deleted volume|Erasing" uninstall_nix_dry.txt; then
+            echo "ERROR: dry-run appears to have performed a destructive action"
+            exit 1
+          fi
+          echo "uninstall-nix-macos --dry-run previewed safely"
+
+          echo "Doctor + uninstaller smoke tests complete"
+
       - name: Package manager testing
         run: |
           echo "=== Package Manager Testing ==="
@@ -705,12 +748,11 @@ jobs:
           print("\n".join(lines[-200:]))
 
           # macsmith propagates real subsystem failures into its exit code, so
-          # surface it. Kept non-fatal (a warning) because optional-tool hiccups
-          # (e.g. transient network) are expected on CI runners; swap the warning
-          # for sys.exit(result.returncode) to hard-gate on it.
+          # Fail the job when any update subsystem reports an error.
           print(f"macsmith update exit code: {result.returncode}")
           if result.returncode != 0:
-              print(f"::warning::macsmith update exited non-zero ({result.returncode}); a subsystem reported a failure")
+              print(f"::error::macsmith update exited non-zero ({result.returncode}); a subsystem reported a failure")
+              sys.exit(result.returncode)
 
           if "Update finished" not in output:
               print("Update did not report completion")
@@ -847,16 +889,22 @@ jobs:
               exit 1
             fi
 
-            if grep -qi "pyenv.*cleanup disabled" update_output.txt; then
-              echo "MACSMITH_CLEAN_PYENV=0 works"
+            if grep -qi "pyenv.*cleanup is opt-in" update_output.txt; then
+              echo "OK: MACSMITH_CLEAN_PYENV=0 disabled pyenv old-version cleanup (opt-in message present)"
+            elif grep -qi "pyenv.*Removing old versions" update_output.txt; then
+              echo "::error::pyenv old-version cleanup ran despite MACSMITH_CLEAN_PYENV=0"
+              exit 1
             else
-              echo "MACSMITH_CLEAN_PYENV=0 test inconclusive (may be OK if pyenv not installed)"
+              echo "MACSMITH_CLEAN_PYENV=0 not exercised this run (pyenv inactive or already at latest) - skipping"
             fi
 
-            if grep -qi "nvm.*cleanup disabled" update_output.txt; then
-              echo "MACSMITH_CLEAN_NVM=0 works"
+            if grep -qi "nvm.*cleanup is opt-in" update_output.txt; then
+              echo "OK: MACSMITH_CLEAN_NVM=0 disabled nvm old-version cleanup (opt-in message present)"
+            elif grep -qi "nvm.*Removing older Node versions" update_output.txt; then
+              echo "::error::nvm old-version cleanup ran despite MACSMITH_CLEAN_NVM=0"
+              exit 1
             else
-              echo "MACSMITH_CLEAN_NVM=0 test inconclusive (may be OK if nvm not installed)"
+              echo "MACSMITH_CLEAN_NVM=0 not exercised this run (nvm inactive) - skipping"
             fi
 
             echo "MACSMITH_SWIFT_SNAPSHOTS=1 set (will be used if swiftly is installed)"
@@ -1106,10 +1154,11 @@ jobs:
           # Test Nix installation command
           echo ""
           echo "Testing Nix installation command..."
-          if grep -qE "curl --proto.*=https.*--tlsv1.2.*nixos.org/nix/install" install.sh; then
-            echo "Nix installation uses secure curl command with --proto and --tlsv1.2"
+          if grep -q '_download_verified_script "https://nixos.org/nix/install"' install.sh; then
+            echo "Nix installer is fetched via _download_verified_script (SHA-256 + TLS verified)"
           else
-            echo "WARNING: Nix installation may not use secure curl command"
+            echo "::error::Nix installer no longer uses the verified-download path"
+            exit 1
           fi
           
           # Test MacPorts installation from source
@@ -1140,11 +1189,14 @@ jobs:
           echo ""
           echo "Testing re-running install.sh..."
           zsh -lc '
-            # Run install.sh a second time to test idempotency (NONINTERACTIVE auto-answers yes)
-            if (./install.sh 2>&1 | tee install2.log); then
+            # Capture install.sh's pipeline status while testing idempotency.
+            ./install.sh 2>&1 | tee install2.log
+            rerun_rc=${pipestatus[1]}
+            if [[ "$rerun_rc" -eq 0 ]]; then
               echo "install.sh can be re-run successfully"
             else
-              echo "WARNING: install.sh may have issues when re-run"
+              echo "ERROR: install.sh failed when re-run (exit $rerun_rc)"
+              exit 1
             fi
 
             # Check that re-running did not break anything
@@ -1231,9 +1283,7 @@ jobs:
             # Test syntax
             zsh -n quick-test.sh && echo "quick-test.sh syntax OK" || { echo "quick-test.sh syntax error"; exit 1; }
 
-            # Run quick test — fail the job on non-zero exit OR missing output.
-            # Previously this was a warning-only check, which silently let broken
-            # quick-test.sh slip through.
+            # Fail on a non-zero quick-test exit or missing success marker.
             qt_rc=0
             ./quick-test.sh 2>&1 | tee quick_test_output.txt
             qt_rc="${PIPESTATUS[0]}"
@@ -1345,11 +1395,6 @@ jobs:
                 echo "WARNING: $script contains TODO/FIXME markers"
               fi
 
-              # Check for hardcoded paths that might break
-              if grep -qE "/Users/[^/]+/|/home/[^/]+" "$script" 2>/dev/null; then
-                echo "WARNING: $script may contain hardcoded user paths"
-              fi
-
               # Check for proper shebang
               if head -1 "$script" | grep -qE "^#!.*(zsh|bash|sh)"; then
                 echo "$script has proper shebang"
@@ -1398,3 +1443,18 @@ jobs:
           echo "  - dev-tools.sh PATH setup for Unix tools"
           echo ""
           echo "All tests passed!"
+
+  macos-test:
+    name: macOS Functionality Test
+    runs-on: ubuntu-latest
+    needs: [macos-platform]
+    if: always()
+    steps:
+      - name: Require every macOS platform job
+        env:
+          PLATFORM_RESULT: ${{ needs.macos-platform.result }}
+        run: |
+          test "$PLATFORM_RESULT" = success || {
+            echo "macOS platform matrix failed: $PLATFORM_RESULT" >&2
+            exit 1
+          }

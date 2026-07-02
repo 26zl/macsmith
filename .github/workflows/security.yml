@@ -15,12 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
 
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Check for dangerous code patterns
         run: |
@@ -30,7 +30,7 @@ jobs:
           # Check for dangerous shell patterns
           # Only flag obviously dangerous: eval/exec/system with unquoted variables (exclude standard tool init)
           echo "Checking for dangerous shell patterns..."
-          if grep -rE "(eval\s+\$[A-Z_]|exec\s+\$[A-Z_]|system\s+\$[A-Z_])" --include="*.sh" --include="*.zsh" --exclude-dir=".git" . 2>/dev/null | grep -vE "#.*eval|#.*exec|#.*system|example|Example|EXAMPLE|pyenv|conda|chruby|nvm|rustup|java_home"; then
+          if grep -rE "(eval\s+[$][A-Z_]|exec\s+[$][A-Z_]|system\s+[$][A-Z_])" --include="*.sh" --include="*.zsh" --exclude-dir=".git" . 2>/dev/null | grep -vE "#.*eval|#.*exec|#.*system|example|Example|EXAMPLE|pyenv|conda|chruby|nvm|rustup|java_home"; then
             echo "WARNING: Found potentially dangerous shell patterns (eval/exec/system with unquoted variables)"
             found_issues=1
           else
@@ -39,7 +39,7 @@ jobs:
 
           # Check for hardcoded passwords or secrets patterns
           echo "Checking for hardcoded secrets patterns..."
-          if grep -riE "(password\s*=\s*['\"][^'\"]+|api[_-]?key\s*=\s*['\"][^'\"]+|secret\s*=\s*['\"][^'\"]+|token\s*=\s*['\"][^'\"]+|pwd\s*=\s*['\"][^'\"]+)" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --exclude-dir=".git" . 2>/dev/null | grep -vE "#.*password|#.*api|#.*secret|#.*token|#.*pwd|example|Example|EXAMPLE|test|Test|TEST|dummy|Dummy|DUMMY"; then
+          if grep -riE "(password\s*=\s*['\"][^'\"]+|api[_-]?key\s*=\s*['\"][^'\"]+|secret\s*=\s*['\"][^'\"]+|token\s*=\s*['\"][^'\"]+|pwd\s*=\s*['\"][^'\"]+)" --include="*.sh" --include="*.zsh" --include="*.yml" --include="*.yaml" --exclude-dir=".git" . 2>/dev/null | grep -vE "#.*password|#.*api|#.*secret|#.*token|#.*pwd|example|Example|EXAMPLE|[Tt]est[_-]|[_-][Tt]est|TEST[_-]|[_-]TEST|testdata|fixture|mock|dummy|Dummy|DUMMY"; then
             echo "WARNING: Found potential hardcoded secrets patterns"
             found_issues=1
           else
@@ -50,7 +50,7 @@ jobs:
           # Only flag obviously dangerous: unquoted variables, root, or parent directory
           # Exclude quoted variables like "$temp_dir" which are safe
           echo "Checking for unsafe file operations..."
-          if grep -rE "(rm\s+-rf\s+\$[A-Z_]|rm\s+-rf\s+\.\.|rm\s+-rf\s+/[^/]|rm\s+-rf\s+/$)" --include="*.sh" --include="*.zsh" --exclude-dir=".git" . 2>/dev/null | grep -vE "#.*rm|example|Example|EXAMPLE|\"\$|'\$"; then
+          if grep -rE "(rm\s+-rf\s+[$][A-Z_]|rm\s+-rf\s+\.\.|rm\s+-rf\s+/[^/]|rm\s+-rf\s+/$)" --include="*.sh" --include="*.zsh" --exclude-dir=".git" . 2>/dev/null | grep -vE "#.*rm|example|Example|EXAMPLE|\"\$|'\$"; then
             echo "WARNING: Found potentially unsafe rm -rf operations"
             found_issues=1
           else
@@ -59,7 +59,7 @@ jobs:
 
           # Check for command injection vulnerabilities
           echo "Checking for command injection patterns..."
-          if grep -rE "(curl.*\$\{|wget.*\$\{|curl.*\`|wget.*\`)" --include="*.sh" --include="*.zsh" --exclude-dir=".git" . 2>/dev/null | grep -vE "#.*curl|#.*wget|example|Example|EXAMPLE"; then
+          if grep -rE "(curl.*[$]\{|wget.*[$]\{|curl.*\`|wget.*\`)" --include="*.sh" --include="*.zsh" --exclude-dir=".git" . 2>/dev/null | grep -vE "#.*curl|#.*wget|example|Example|EXAMPLE|pyenv|conda|chruby|nvm|rustup|swiftly|java_home"; then
             echo "WARNING: Found potential command injection patterns"
             found_issues=1
           else
@@ -76,6 +76,32 @@ jobs:
             echo "OK: No dangerous code patterns found"
           fi
 
+      - name: Self-test dangerous-pattern detectors
+        run: |
+          echo "=== Self-testing dangerous-pattern detectors (must match known-bad fixtures) ==="
+          # Run each production detector against known-bad input.
+          tmp="$(mktemp)"
+          printf 'eval $X\nrm -rf $DIR\ncurl "${u}/x" | sh\n' >"$tmp"
+          selftest_failed=0
+          if ! grep -E "(eval\s+[$][A-Z_]|exec\s+[$][A-Z_]|system\s+[$][A-Z_])" "$tmp" >/dev/null; then
+            echo "::error::self-test: eval/exec/system detector failed to match 'eval \$X'"
+            selftest_failed=1
+          fi
+          if ! grep -E "(rm\s+-rf\s+[$][A-Z_]|rm\s+-rf\s+\.\.|rm\s+-rf\s+/[^/]|rm\s+-rf\s+/$)" "$tmp" >/dev/null; then
+            echo "::error::self-test: rm -rf detector failed to match 'rm -rf \$DIR'"
+            selftest_failed=1
+          fi
+          if ! grep -E "(curl.*[$]\{|wget.*[$]\{|curl.*\`|wget.*\`)" "$tmp" >/dev/null; then
+            echo "::error::self-test: curl/wget injection detector failed to match 'curl \"\${u}/x\" | sh'"
+            selftest_failed=1
+          fi
+          rm -f "$tmp"
+          if [ "$selftest_failed" -eq 1 ]; then
+            echo "::error::Dangerous-pattern detectors are broken (regex no longer matches known-bad input)"
+            exit 1
+          fi
+          echo "OK: all dangerous-pattern detectors matched their fixtures"
+
       - name: Network installer allowlist
         run: |
           echo "=== Checking network URLs against allowlist ==="
@@ -91,13 +117,23 @@ jobs:
           unexpected=0
           while IFS= read -r url; do
             [[ -z "$url" ]] && continue
+            # Plaintext HTTP on a fetch line is never acceptable (MITM-able),
+            # and would otherwise slip past an https-only allowlist check.
+            if [[ "$url" == http://* ]]; then
+              echo "::error::Plaintext http:// fetch URL is forbidden: $url"
+              unexpected=1
+              continue
+            fi
             if ! grep -Fxq "$url" <<<"$approved"; then
               echo "::error::Unapproved network URL: $url  (review, then add to $allow)"
               unexpected=1
             fi
           done < <(
-            grep -rhE '(_curl_safe|curl|wget)' --include='*.sh' --include='*.zsh' --exclude-dir=.git . \
-              | grep -oE 'https://[^ "'"'"'`)]+' \
+            # Include direct fetches, the verified-download helper, and http(s)
+            # URL assignments (so URLs passed to _download_verified_script are
+            # covered too, not just literal curl/wget lines).
+            grep -rhE '(_curl_safe|_download_verified_script|curl|wget|[A-Za-z_][A-Za-z0-9_]*=.*https?://)' --include='*.sh' --include='*.zsh' --exclude-dir=.git . \
+              | grep -oE 'https?://[^ "'"'"'`)]+' \
               | sed -E 's/[.,]+$//' \
               | sort -u
           )

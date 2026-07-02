@@ -1,9 +1,7 @@
 name: Release
 
-# Auto-release: every green run of "macOS Test" on main produces a release.
-# The check-workflows job below still gates on Checks + macOS Test + Security
-# Scan all succeeding on the same SHA, so a partial-green main can't ship.
-# Manual flows still work:
+# Auto-release only when all required workflows pass on the same SHA.
+# Manual flows:
 #   A. gh release create vYYYY.MM.DD-<short-sha> --generate-notes
 #   B. GitHub UI → Releases → Draft a new release → Publish
 #   C. Actions → Release → Run workflow (supply a version string)
@@ -22,26 +20,34 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
   actions: read
+
+# One release run per target commit; never cancel an in-flight publish.
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha || github.event.release.tag_name || github.sha }}
+  cancel-in-progress: false
 
 jobs:
   check-workflows:
     name: Check All Workflows Status
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     # Run for every trigger so release/workflow_dispatch can't bypass CI gating
     outputs:
       all-success: ${{ steps.check.outputs.all-success }}
       head-sha: ${{ steps.check.outputs.head-sha }}
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
 
       - name: Wait for all workflows and check status
         id: check
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             // Resolve the SHA we're gating on based on the trigger
@@ -185,17 +191,21 @@ jobs:
     name: Create Release Package
     runs-on: ubuntu-latest
     needs: [check-workflows]
-    # Gate on check-workflows for every trigger. A failing or skipped check
-    # blocks release artifact publication (closes a supply-chain bypass).
+    # Grant only the permissions needed to publish and attest the release.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    # Block artifact publication unless workflow gating succeeds.
     if: needs.check-workflows.outputs.all-success == 'true'
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
 
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Pin to the exact SHA that passed gating, not the moving branch tip,
           # so `git archive HEAD` packages the commit that was validated.
@@ -206,11 +216,9 @@ jobs:
       - name: Get version
         id: version
         env:
-          # Pass the untrusted workflow_dispatch input via env so it reaches the
-          # shell as DATA, never interpolated into the script text — closes the
-          # `${{ github.event.inputs.version }}` command-injection sink on the
-          # contents:write release runner.
+          # Pass event-derived values through the environment instead of script interpolation.
           VERSION_INPUT: ${{ github.event.inputs.version }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             VERSION="$VERSION_INPUT"
@@ -218,16 +226,13 @@ jobs:
             VERSION="${GITHUB_REF#refs/tags/}"
           elif [ "${{ github.event_name }}" == "workflow_run" ]; then
             # Auto-generate version based on date and commit SHA
-            COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"
+            COMMIT_SHA="$HEAD_SHA"
             SHORT_SHA="${COMMIT_SHA:0:7}"
             DATE=$(date +%Y.%m.%d)
             VERSION="v${DATE}-${SHORT_SHA}"
             echo "Auto-generated version: $VERSION"
           fi
-          # Allow only tag-shaped values: v + alnum/._- with no spaces,
-          # newlines, shell metacharacters, or path separators. A shell `case`
-          # pattern like v[0-9A-Za-z._-]* is NOT enough: the trailing `*` means
-          # "any suffix", so `v1;bad` passes. Bash regex anchors close that.
+          # Accept only tag-shaped version values.
           if [[ ! "$VERSION" =~ ^v[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
             echo "ERROR: invalid version: $VERSION" >&2
             exit 1
@@ -241,11 +246,7 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           PACKAGE_NAME="macsmith-${VERSION}"
 
-          # Use `git archive` so release packaging respects .gitattributes
-          # export-ignore rules (single source of truth for what ships).
-          # --worktree-attributes reads .gitattributes from the working tree
-          # rather than the committed version, so a PR bumping the rules
-          # takes effect immediately.
+          # Package with the working tree's .gitattributes export rules.
           git archive \
             --format=tar \
             --worktree-attributes \
@@ -253,9 +254,7 @@ jobs:
             HEAD \
             | tar -x
 
-          # Write the resolved version into the package so install.sh can read
-          # it without .git or API calls (avoids the "installing an older zip
-          # but reporting latest release" version-drift bug).
+          # Embed the resolved version for installs without Git metadata.
           printf '%s\n' "$VERSION" > "$PACKAGE_NAME/VERSION"
 
           # Create zip (git archive gave us a clean directory; no extra excludes needed)
@@ -274,11 +273,46 @@ jobs:
           echo "$CHECKSUM_CONTENT" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
+      - name: Smoke-test release artifact
+        env:
+          ZIP_FILE: ${{ steps.package.outputs.zip_file }}
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          unzip -t "$ZIP_FILE"
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+          unzip -q "$ZIP_FILE" -d "$smoke_dir"
+
+          for required in install.sh dev-tools.sh bootstrap.sh zsh.sh macsmith.sh \
+            scripts/nix-macos-maintenance.sh scripts/uninstall-nix-macos.sh \
+            scripts/uninstall-macsmith.sh config/starship.toml \
+            config/profiles.conf VERSION; do
+            test -f "$smoke_dir/$required" || {
+              echo "Missing release file: $required" >&2
+              exit 1
+            }
+          done
+          test "$(cat "$smoke_dir/VERSION")" = "$EXPECTED_VERSION"
+          zsh -n "$smoke_dir"/{install.sh,dev-tools.sh,bootstrap.sh,zsh.sh,macsmith.sh}
+          bash -n "$smoke_dir"/scripts/*.sh
+
+          if unzip -Z1 "$ZIP_FILE" | grep -Eq '^(\.git|\.github|\.vscode|tests/|background/|quick-test\.sh|CLAUDE\.md)'; then
+            echo "Development-only files leaked into release artifact" >&2
+            exit 1
+          fi
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: ${{ steps.package.outputs.zip_file }}
+
       - name: Create Release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: Release ${{ steps.version.outputs.version }}
+          generate_release_notes: true
           body: |
             ## macsmith ${{ steps.version.outputs.version }}
             
@@ -296,10 +330,9 @@ jobs:
             - `bootstrap.sh` — One-liner bootstrap (clones + runs install.sh)
             - `zsh.sh` — Zsh configuration installed as `~/.zshrc`
             - `macsmith.sh` — The maintenance binary (becomes `~/.local/bin/macsmith`)
-            - `config/starship.toml` — Default Starship prompt config
+            - `config/` — Default Starship config and shared package-profile manifest
             - `scripts/` — Nix maintenance helper
-            - `background/` — Terminal background images (referenced by Ghostty config)
-            - `README.md`, `LICENSE`, `Ghostty config.txt`
+            - `README.md`, `LICENSE`, `ASSETS.md`
             - `VERSION` — Injected by the release pipeline so `install.sh` knows what it is
             
             ### Checksums
@@ -313,7 +346,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-package
           path: |

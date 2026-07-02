@@ -68,12 +68,27 @@ _get_nix_version() {
     fi
 }
 
+# Count profile packages from JSON or old-style index lines and return 0 on errors.
+_nix_profile_count() {
+    local json count
+    if command -v jq > /dev/null 2>&1; then
+        json=$(nix profile list --json 2>/dev/null) || json=""
+        if [[ -n "$json" ]]; then
+            count=$(printf '%s' "$json" | jq '(.elements | if type=="array" then length else (keys | length) end)' 2>/dev/null) || count=""
+            if [[ "$count" =~ ^[0-9]+$ ]]; then
+                printf '%s' "$count"
+                return 0
+            fi
+        fi
+    fi
+    count=$(nix profile list 2>/dev/null | grep -cE '^[0-9]+ ') || count=0
+    printf '%s' "$count"
+}
+
 # Check if marker exists in file
 _has_marker() {
     local file="$1"
-    # Anchor to column 1 so this stays consistent with _remove_marker_block,
-    # which only strips markers at line start (index==1). A loose match here
-    # would report "present" for a block the remover then silently can't touch.
+    # Anchor markers to match the remover's line-start rule.
     if [[ -f "$file" ]] && grep -q "^${NIX_MARKER_START}" "$file" 2>/dev/null; then
         return 0
     fi
@@ -87,23 +102,30 @@ _remove_marker_block() {
         return 0
     fi
 
-    # Back the file up before rewriting it — this edits the user's shell config
-    # and gets no confirmation in non-interactive mode.
-    cp "$file" "$file.macsmith-bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    # Leave files without a managed marker untouched.
+    if ! _has_marker "$file"; then
+        return 0
+    fi
 
-    # Use a temporary file to avoid in-place editing issues
+    # Abort the edit if the shell-config backup fails.
+    if ! cp "$file" "$file.macsmith-bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null; then
+        _log_warning "Could not back up $file before editing; left unchanged."
+        return 1
+    fi
+
+    # Keep only the 5 most recent backups so repeated runs don't accumulate them.
+    local old
+    while IFS= read -r old; do
+        [[ -n "$old" ]] && rm -f "$old"
+    done < <(ls -1t "$file".macsmith-bak.* 2>/dev/null | tail -n +6)
+
+    # Create the temporary file beside the destination for an atomic rename.
     local temp_file orig_perms
-    temp_file=$(mktemp)
+    temp_file=$(mktemp "${file}.XXXXXX")
     # Preserve original file permissions
     orig_perms=$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file" 2>/dev/null || echo "644")
 
-    # Remove lines between markers (inclusive). Pass the constants as awk vars
-    # so the markers stay in a single source of truth with the declarations at
-    # the top of this file — previously NIX_MARKER_END was unused (SC2034).
-    # END guard: if a BEGIN marker has no matching END (file hand-edited, or a
-    # prior write was truncated), in_block would stay set to EOF and every line
-    # after BEGIN would be deleted. Exit non-zero in that case and leave the
-    # file untouched rather than silently destroying the user's shell config.
+    # Remove a complete marker block and reject an unmatched start marker.
     if ! awk -v start="$NIX_MARKER_START" -v end="$NIX_MARKER_END" '
         index($0, start) == 1 { in_block=1; next }
         index($0, end) == 1 { in_block=0; next }
@@ -115,7 +137,11 @@ _remove_marker_block() {
         return 1
     fi
 
-    mv "$temp_file" "$file"
+    if ! mv "$temp_file" "$file"; then
+        rm -f "$temp_file" 2>/dev/null || true
+        _log_warning "Could not replace $file; left unchanged."
+        return 1
+    fi
     chmod "$orig_perms" "$file" 2>/dev/null || true
 }
 
@@ -139,7 +165,32 @@ EOF
     
     # Append to .zprofile if it doesn't exist or doesn't have marker
     if [[ ! -f "$ZPROFILE" ]] || ! _has_marker "$ZPROFILE"; then
-        echo "$hook_content" >> "$ZPROFILE"
+        # Back up and atomically replace the file instead of appending in place.
+        if [[ -f "$ZPROFILE" ]]; then
+            if ! cp "$ZPROFILE" "$ZPROFILE.macsmith-bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null; then
+                _log_warning "Could not back up $ZPROFILE before editing; left unchanged."
+                return 1
+            fi
+            # Keep only the 5 most recent backups so repeated runs don't accumulate them.
+            local old
+            while IFS= read -r old; do
+                [[ -n "$old" ]] && rm -f "$old"
+            done < <(ls -1t "$ZPROFILE".macsmith-bak.* 2>/dev/null | tail -n +6)
+        fi
+
+        local temp_file orig_perms
+        temp_file=$(mktemp "${ZPROFILE}.XXXXXX")
+        orig_perms=$(stat -f '%Lp' "$ZPROFILE" 2>/dev/null || stat -c '%a' "$ZPROFILE" 2>/dev/null || echo "644")
+
+        if [[ -s "$ZPROFILE" ]]; then
+            cat "$ZPROFILE" > "$temp_file"
+            # Add a trailing newline before the managed block.
+            [[ -n "$(tail -c1 "$ZPROFILE")" ]] && printf '\n' >> "$temp_file"
+        fi
+        printf '%s\n' "$hook_content" >> "$temp_file"
+
+        mv "$temp_file" "$ZPROFILE"
+        chmod "$orig_perms" "$ZPROFILE" 2>/dev/null || true
         _log_success "Added Nix hook to $ZPROFILE"
         return 0
     else
@@ -164,8 +215,7 @@ cmd_ensure_path() {
         # Only prompt if we have a TTY (interactive mode)
         if [[ -t 0 ]]; then
             _log_info "Would you like to remove it from $ZSHRC? (y/N)"
-            # || response="" maps EOF/Ctrl-D to the safe default (keep the hook)
-            # instead of aborting the whole run under set -e.
+            # Treat EOF as the safe default under set -e.
             read -r response || response=""
             if [[ "$response" =~ ^[Yy]$ ]]; then
                 if _remove_marker_block "$ZSHRC"; then
@@ -263,17 +313,17 @@ cmd_status() {
     echo ""
     _log_info "Checking nix profile packages..."
     local profile_count
-    profile_count=$(nix profile list 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    profile_count=$(_nix_profile_count)
     if [[ "$profile_count" -gt 0 ]]; then
         _log_success "nix profile has $profile_count package(s)"
     else
         _log_info "nix profile is empty (no packages installed via nix profile)"
     fi
     
-    # Check nix-env packages
+    # Keep an unavailable nix-env from aborting diagnostic status output.
     _log_info "Checking nix-env packages..."
     local env_count
-    env_count=$(nix-env -q 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    env_count=$(nix-env -q 2>/dev/null | wc -l | tr -d ' ') || env_count=0
     if [[ "$env_count" -gt 0 ]]; then
         _log_success "nix-env has $env_count package(s)"
     else
@@ -297,6 +347,40 @@ cmd_status() {
     else
         _log_warning "Found $issues issue(s) - see above for details"
     fi
+}
+
+# Parse only the canonical dry-run upgrade target and always exit successfully.
+_parse_nix_upgrade_target() {
+    printf '%s\n' "$1" \
+        | grep -i "would upgrade to version" \
+        | sed -E 's/.*version ([0-9.]+).*/\1/' \
+        | head -1 || true
+}
+
+# Return 0 (true) when $1 (current version) is newer than $2 (target version),
+# i.e. applying the "upgrade" would actually be a downgrade.
+_is_nix_downgrade() {
+    local current="$1" target="$2"
+    local current_major current_minor current_patch
+    local target_major target_minor target_patch
+
+    IFS='.' read -r current_major current_minor current_patch <<< "$current"
+    IFS='.' read -r target_major target_minor target_patch <<< "$target"
+
+    # Strip non-numeric suffixes (e.g., "10pre20241025" -> "10") and default to 0
+    current_patch="${current_patch%%[!0-9]*}"; [[ -z "$current_patch" ]] && current_patch=0
+    target_patch="${target_patch%%[!0-9]*}"; [[ -z "$target_patch" ]] && target_patch=0
+    current_major="${current_major%%[!0-9]*}"; [[ -z "$current_major" ]] && current_major=0
+    current_minor="${current_minor%%[!0-9]*}"; [[ -z "$current_minor" ]] && current_minor=0
+    target_major="${target_major%%[!0-9]*}"; [[ -z "$target_major" ]] && target_major=0
+    target_minor="${target_minor%%[!0-9]*}"; [[ -z "$target_minor" ]] && target_minor=0
+
+    if [[ "$current_major" -gt "$target_major" ]] || \
+       { [[ "$current_major" -eq "$target_major" ]] && [[ "$current_minor" -gt "$target_minor" ]]; } || \
+       { [[ "$current_major" -eq "$target_major" ]] && [[ "$current_minor" -eq "$target_minor" ]] && [[ "$current_patch" -gt "$target_patch" ]]; }; then
+        return 0
+    fi
+    return 1
 }
 
 # Preview Nix upgrade
@@ -327,35 +411,17 @@ cmd_preview_nix_upgrade() {
     
     # Parse output for version
     local target_version
-    target_version=$(echo "$upgrade_output" | grep -i "would upgrade to version" | sed -E 's/.*version ([0-9.]+).*/\1/' || echo "")
-    
+    target_version=$(_parse_nix_upgrade_target "$upgrade_output")
+
     if [[ -z "$target_version" ]]; then
         _log_warning "Could not parse target version from output"
         _log_info "Please review the output above manually"
         return 0
     fi
-    
+
     _log_info "Target version: $target_version"
-    
-    # Compare versions (simple numeric comparison)
-    local current_major current_minor current_patch
-    local target_major target_minor target_patch
-    
-    IFS='.' read -r current_major current_minor current_patch <<< "$current_version"
-    IFS='.' read -r target_major target_minor target_patch <<< "$target_version"
 
-    # Strip non-numeric suffixes (e.g., "10pre20241025" -> "10")
-    current_patch="${current_patch%%[!0-9]*}"; [[ -z "$current_patch" ]] && current_patch=0
-    target_patch="${target_patch%%[!0-9]*}"; [[ -z "$target_patch" ]] && target_patch=0
-    current_major="${current_major%%[!0-9]*}"; [[ -z "$current_major" ]] && current_major=0
-    current_minor="${current_minor%%[!0-9]*}"; [[ -z "$current_minor" ]] && current_minor=0
-    target_major="${target_major%%[!0-9]*}"; [[ -z "$target_major" ]] && target_major=0
-    target_minor="${target_minor%%[!0-9]*}"; [[ -z "$target_minor" ]] && target_minor=0
-
-    # Simple version comparison
-    if [[ "$current_major" -gt "$target_major" ]] || \
-       [[ "$current_major" -eq "$target_major" && "$current_minor" -gt "$target_minor" ]] || \
-       [[ "$current_major" -eq "$target_major" && "$current_minor" -eq "$target_minor" && "$current_patch" -gt "$target_patch" ]]; then
+    if _is_nix_downgrade "$current_version" "$target_version"; then
         _log_warning "THIS IS A DOWNGRADE!"
         _log_warning "Current: $current_version -> Target: $target_version"
         _log_info "nix upgrade-nix follows nixpkgs fallback and may be older than installed Nix"
@@ -378,10 +444,11 @@ cmd_update() {
     fi
     
     local updated=false
+    local failed=false
     
     # Check and update nix profile
     local profile_count
-    profile_count=$(nix profile list 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    profile_count=$(_nix_profile_count)
     
     if [[ "$profile_count" -gt 0 ]]; then
         _log_info "Updating $profile_count package(s) in nix profile..."
@@ -390,6 +457,7 @@ cmd_update() {
             updated=true
         else
             _log_error "Failed to update nix profile packages"
+            failed=true
         fi
     else
         _log_info "nix profile is empty - no packages to update"
@@ -398,7 +466,7 @@ cmd_update() {
     
     # Check and update nix-env
     local env_count
-    env_count=$(nix-env -q 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    env_count=$(nix-env -q 2>/dev/null | wc -l | tr -d ' ') || env_count=0
     
     if [[ "$env_count" -gt 0 ]]; then
         _log_info "Updating $env_count package(s) in nix-env..."
@@ -407,6 +475,7 @@ cmd_update() {
             updated=true
         else
             _log_error "Failed to update nix-env packages"
+            failed=true
         fi
     else
         _log_info "nix-env is empty - no legacy packages to update"
@@ -420,53 +489,24 @@ cmd_update() {
     current_nix_version=$(_get_nix_version)
     
     if [[ -n "$current_nix_version" && "$current_nix_version" != "not in PATH" && "$current_nix_version" != "unknown" ]]; then
-        # Run preview (dry-run) to check target version
-        local upgrade_preview
-        upgrade_preview=$(sudo -H nix upgrade-nix --dry-run --profile /nix/var/nix/profiles/default 2>&1 || echo "")
-        
-        if [[ -n "$upgrade_preview" ]]; then
-            # Parse target version from preview output
-            local target_version
-            target_version=$(echo "$upgrade_preview" | grep -iE "would upgrade to version|upgrade to|version [0-9]" | sed -E 's/.*[vV]?([0-9]+\.[0-9]+\.[0-9]+).*/\1/' | head -1 || echo "")
-            
-            if [[ -n "$target_version" && "$target_version" != "$current_nix_version" ]]; then
-                # Compare versions
-                local current_major current_minor current_patch
-                local target_major target_minor target_patch
-                
-                IFS='.' read -r current_major current_minor current_patch <<< "$current_nix_version"
-                IFS='.' read -r target_major target_minor target_patch <<< "$target_version"
-
-                # Strip non-numeric suffixes and default to 0
-                current_patch="${current_patch%%[!0-9]*}"; [[ -z "$current_patch" ]] && current_patch=0
-                target_patch="${target_patch%%[!0-9]*}"; [[ -z "$target_patch" ]] && target_patch=0
-                current_major="${current_major%%[!0-9]*}"; [[ -z "$current_major" ]] && current_major=0
-                current_minor="${current_minor%%[!0-9]*}"; [[ -z "$current_minor" ]] && current_minor=0
-                target_major="${target_major%%[!0-9]*}"; [[ -z "$target_major" ]] && target_major=0
-                target_minor="${target_minor%%[!0-9]*}"; [[ -z "$target_minor" ]] && target_minor=0
-                
-                # Check if it's a downgrade
-                local is_downgrade=false
-                if [[ "$current_major" -gt "$target_major" ]] || \
-                   { [[ "$current_major" -eq "$target_major" ]] && [[ "$current_minor" -gt "$target_minor" ]]; } || \
-                   { [[ "$current_major" -eq "$target_major" ]] && [[ "$current_minor" -eq "$target_minor" ]] && [[ "$current_patch" -gt "$target_patch" ]]; }; then
-                    is_downgrade=true
-                fi
-                
-                if [[ "$is_downgrade" == "true" ]]; then
-                    _log_warning "Nix CLI upgrade skipped: would downgrade ($current_nix_version -> $target_version)"
-                    _log_info "nix upgrade-nix follows nixpkgs fallback and may be older than installed Nix"
-                else
-                    _log_info "Nix CLI upgrade available: $current_nix_version -> $target_version"
-                    _log_info "To upgrade: sudo -H nix upgrade-nix --profile /nix/var/nix/profiles/default"
-                fi
-            elif [[ -z "$target_version" ]]; then
-                _log_info "Nix CLI is up to date ($current_nix_version)"
-            else
-                _log_info "Nix CLI is up to date ($current_nix_version)"
-            fi
+        # Check the upgrade target only with already-cached sudo credentials.
+        if ! sudo -n true 2>/dev/null; then
+            _log_info "Could not check Nix CLI upgrade without cached sudo credentials."
+            _log_info "Run: ./scripts/nix-macos-maintenance.sh preview-nix-upgrade"
         else
-            _log_info "Could not check Nix CLI upgrade (preview requires sudo or nix not properly configured)"
+            local upgrade_preview target_version
+            upgrade_preview=$(sudo -n nix upgrade-nix --dry-run --profile /nix/var/nix/profiles/default 2>&1 || echo "")
+            target_version=$(_parse_nix_upgrade_target "$upgrade_preview")
+
+            if [[ -z "$target_version" || "$target_version" == "$current_nix_version" ]]; then
+                _log_info "Nix CLI is up to date ($current_nix_version)"
+            elif _is_nix_downgrade "$current_nix_version" "$target_version"; then
+                _log_warning "Nix CLI upgrade skipped: would downgrade ($current_nix_version -> $target_version)"
+                _log_info "nix upgrade-nix follows nixpkgs fallback and may be older than installed Nix"
+            else
+                _log_info "Nix CLI upgrade available: $current_nix_version -> $target_version"
+                _log_info "To upgrade: sudo -H nix upgrade-nix --profile /nix/var/nix/profiles/default"
+            fi
         fi
     else
         _log_info "Could not determine current Nix version"
@@ -477,6 +517,11 @@ cmd_update() {
     else
         _log_info "No packages to update"
     fi
+    if [[ "$failed" == "true" ]]; then
+        _log_error "One or more Nix package updates failed"
+        return 1
+    fi
+    return 0
 }
 
 # Cleanup command
@@ -523,10 +568,7 @@ cmd_cleanup() {
 cmd_fix_compaudit() {
     _log_section "Fixing zsh insecure completion directories"
 
-    # compaudit ships with zsh's compinit (autoload-on-demand) — it's a zsh
-    # function, not a regular command, so this bash script invokes it via
-    # a `zsh -c` subshell. The previous "command -v compaudit" check never
-    # worked from bash and would always early-return.
+    # Invoke the autoloaded zsh compaudit function through a zsh subprocess.
     if ! command -v zsh >/dev/null 2>&1; then
         _log_error "zsh not found; cannot run compaudit"
         return 1
@@ -534,7 +576,7 @@ cmd_fix_compaudit() {
 
     _log_info "Checking for insecure completion directories..."
     local insecure_dirs
-    insecure_dirs=$(zsh -c 'autoload -Uz compaudit && compaudit' 2>&1 || true)
+    insecure_dirs=$(zsh -c 'autoload -Uz compaudit && compaudit' 2>/dev/null || true)
 
     if [[ -z "$insecure_dirs" ]]; then
         _log_success "No insecure directories found"
@@ -547,26 +589,34 @@ cmd_fix_compaudit() {
 
     _log_info "Fixing permissions (removing group/other write permissions)..."
 
-    if echo "$insecure_dirs" | xargs -I {} chmod g-w,o-w {} 2>/dev/null; then
-        _log_success "Permissions fixed"
-    else
-        _log_error "Failed to fix permissions (may require sudo)"
-        _log_info "Try: zsh -c 'autoload -Uz compaudit && compaudit' | xargs sudo chmod g-w,o-w"
-        return 1
-    fi
+    # Use the follow-up compaudit result instead of xargs' aggregate status.
+    echo "$insecure_dirs" | xargs -I {} chmod g-w,o-w {} 2>/dev/null || true
 
     # Verify
     echo ""
     _log_info "Verifying fix..."
     local remaining
-    remaining=$(zsh -c 'autoload -Uz compaudit && compaudit' 2>&1 || true)
+    remaining=$(zsh -c 'autoload -Uz compaudit && compaudit' 2>/dev/null || true)
 
     if [[ -z "$remaining" ]]; then
         _log_success "All issues resolved!"
     else
         _log_warning "Some issues remain:"
         echo "$remaining"
-        _log_info "These may require sudo to fix"
+        _log_info "These may require sudo to fix:"
+        _log_info "  zsh -c 'autoload -Uz compaudit && compaudit' | xargs sudo chmod g-w,o-w"
+    fi
+}
+
+# Remove the managed Nix maintenance hook block from ~/.zprofile
+cmd_remove_path() {
+    _log_info "Removing the Nix maintenance hook block from $ZPROFILE..."
+    if _remove_marker_block "$ZPROFILE"; then
+        _log_success "Nix maintenance hook removed (or already absent)."
+        _log_info "Open a new shell or run: source ~/.zprofile"
+    else
+        _log_warning "Could not remove the hook block (see message above)."
+        return 1
     fi
 }
 
@@ -581,6 +631,7 @@ USAGE:
 COMMANDS:
     status              Check Nix installation status
     ensure-path         Ensure Nix is in PATH (idempotent)
+    remove-path         Remove the Nix maintenance hook block from ~/.zprofile
     update              Update nix profile and nix-env packages
     preview-nix-upgrade Preview Nix CLI upgrade (dry-run, shows downgrade warnings)
     cleanup             Run garbage collection and store optimisation
@@ -617,6 +668,9 @@ main() {
             ;;
         ensure-path)
             cmd_ensure_path
+            ;;
+        remove-path)
+            cmd_remove_path
             ;;
         update)
             cmd_update
