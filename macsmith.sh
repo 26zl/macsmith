@@ -2272,10 +2272,19 @@ except Exception:
     local rust_errors=()
     
     # Update rustup itself first
-    echo "  Updating rustup..."
     local rustup_output=""
     local rustup_exit_code=0
-    rustup_output="$(rustup self update 2>&1)" || rustup_exit_code=$?
+    # `rustup self update` is disabled (and returns non-zero) when rustup is
+    # externally managed, e.g. installed via Homebrew — skip it there.
+    local _rustup_path _rustup_brew
+    _rustup_path="$(command -v rustup 2>/dev/null)"
+    _rustup_brew="$(_detect_brew_prefix)"
+    if [[ -n "$_rustup_brew" && "$_rustup_path" == "$_rustup_brew"/* ]]; then
+      echo "  ${BLUE}INFO:${NC} rustup is Homebrew-managed — skipping self-update (brew upgrades it)"
+    else
+      echo "  Updating rustup..."
+      rustup_output="$(rustup self update 2>&1)" || rustup_exit_code=$?
+    fi
 
     if [[ $rustup_exit_code -eq 0 ]]; then
       # Check if output indicates an actual update occurred
