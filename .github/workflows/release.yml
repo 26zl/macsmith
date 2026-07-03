@@ -279,6 +279,9 @@ jobs:
           EXPECTED_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
+          if ! command -v zsh >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -qq -y zsh
+          fi
           unzip -t "$ZIP_FILE"
           smoke_dir="$(mktemp -d)"
           trap 'rm -rf "$smoke_dir"' EXIT
