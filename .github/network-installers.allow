@@ -32,3 +32,8 @@ https://go.dev/dl/?mode=json
 
 # --- network probes (public IP echo) ---
 https://ifconfig.me
+
+# --- AI tool installers ---
+https://claude.ai/install.sh
+https://ollama.com/install.sh
+https://opencode.ai/install

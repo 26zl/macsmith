@@ -19,9 +19,7 @@
 
 set -euo pipefail
 
-# --------------------------------------------------------------------------
 # Colours + logging
-# --------------------------------------------------------------------------
 if [[ -n "${NO_COLOR:-}" ]]; then
   readonly RED='' GREEN='' YELLOW='' BLUE='' NC=''
 else
@@ -36,9 +34,7 @@ log_err()     { printf '%b[FAIL]%b %s\n'  "$RED"    "$NC" "$*" >&2; }
 log_dry()     { printf '%b[DRY ]%b %s\n'  "$YELLOW" "$NC" "$*"; }
 log_section() { printf '\n%b== %s ==%b\n' "$BLUE"   "$*" "$NC"; }
 
-# --------------------------------------------------------------------------
 # CLI args
-# --------------------------------------------------------------------------
 DRY_RUN=0
 ASSUME_YES=0
 
@@ -76,9 +72,7 @@ USAGE
   esac
 done
 
-# --------------------------------------------------------------------------
 # Platform check
-# --------------------------------------------------------------------------
 if [[ "$(uname -s)" != "Darwin" ]]; then
   log_err "This script is macOS-only. Detected: $(uname -s)"
   exit 1
@@ -90,9 +84,7 @@ if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
   exit 1
 fi
 
-# --------------------------------------------------------------------------
 # State
-# --------------------------------------------------------------------------
 TS="$(date +%Y%m%d-%H%M%S)"
 LOCAL_BIN="$HOME/.local/bin"
 DATA_DIR="$HOME/.local/share/macsmith"
@@ -109,9 +101,7 @@ ZSHRC_RESTORED_FROM=""
 STARSHIP_REMOVED=0
 ERRORS=0
 
-# --------------------------------------------------------------------------
 # Helpers
-# --------------------------------------------------------------------------
 run() {
   if [[ $DRY_RUN -eq 1 ]]; then
     local fmt=""
@@ -181,9 +171,7 @@ safe_rm() {
   fi
 }
 
-# --------------------------------------------------------------------------
 # Pre-flight summary
-# --------------------------------------------------------------------------
 log_section "Planned actions"
 cat <<EOF
   1. Remove macsmith binaries from $LOCAL_BIN:
@@ -209,23 +197,17 @@ if ! confirm "Proceed?"; then
   exit 0
 fi
 
-# --------------------------------------------------------------------------
 # 1. Binaries
-# --------------------------------------------------------------------------
 log_section "1. Removing macsmith binaries"
 safe_rm "$LOCAL_BIN/macsmith" || ERRORS=$((ERRORS + 1))
 safe_rm "$LOCAL_BIN/uninstall-nix-macos" || ERRORS=$((ERRORS + 1))
 # uninstall-macsmith (self) is handled at the very end.
 
-# --------------------------------------------------------------------------
 # 2. Data dir
-# --------------------------------------------------------------------------
 log_section "2. Removing $DATA_DIR"
 safe_rm "$DATA_DIR" || ERRORS=$((ERRORS + 1))
 
-# --------------------------------------------------------------------------
 # 3. .zprofile managed block
-# --------------------------------------------------------------------------
 log_section "3. Cleaning $ZPROFILE"
 if [[ -f "$ZPROFILE" ]]; then
   # Remove only complete managed blocks and warn before handling legacy blocks.
@@ -377,9 +359,7 @@ else
   log_info "skip (not present): $ZPROFILE"
 fi
 
-# --------------------------------------------------------------------------
 # 4. .zshrc restore
-# --------------------------------------------------------------------------
 log_section "4. Restoring $ZSHRC from backup"
 # Restore the oldest backup without macsmith's signature.
 # shellcheck disable=SC2012
@@ -437,9 +417,7 @@ else
 fi
 unset _all_backups _chosen_backup _b
 
-# --------------------------------------------------------------------------
 # 5. Starship config
-# --------------------------------------------------------------------------
 log_section "5. Starship config"
 if [[ -f "$STARSHIP_CONFIG" ]]; then
   log_info "found: $STARSHIP_CONFIG"
@@ -460,9 +438,7 @@ else
   log_info "skip (not present): $STARSHIP_CONFIG"
 fi
 
-# --------------------------------------------------------------------------
 # Summary (before self-delete so we still have $0 for the message)
-# --------------------------------------------------------------------------
 if [[ $DRY_RUN -eq 1 ]]; then
   log_section "Dry-run complete"
 elif [[ $ERRORS -gt 0 ]]; then
@@ -504,9 +480,7 @@ printf '  3. If you installed language tools via dev-tools.sh, they stay install
 printf '     (pyenv, nvm, chruby, rustup, swiftly, go, …). Remove them individually\n'
 printf '     if desired (e.g., brew uninstall pyenv + rm -rf ~/.pyenv).\n'
 
-# --------------------------------------------------------------------------
 # 6. Self-delete only when invoked as the installed binary.
-# --------------------------------------------------------------------------
 # Resolve relative invocations before deciding whether to self-delete.
 _self_path=""
 if _self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"; then

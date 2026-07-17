@@ -1145,18 +1145,92 @@ install_dotnet() {
   fi
 }
 
-# ============================================================================
 # Modern Python / JS tooling (brew-only, one-liner installs)
-# ============================================================================
 
 install_uv()   { _install_brew_tool uv   "uv (fast Python package manager)"  "Y"; }
 install_bun()  { _install_brew_tool bun  "bun (JS/TS runtime + pkg manager)" "Y"; }  # bun is in homebrew-core; the oven-sh/bun tap is redundant
 install_pnpm() { _install_brew_tool pnpm "pnpm (fast Node package manager)"  "Y"; }
 install_deno() { _install_brew_tool deno "deno (secure JS/TS runtime)"       "N"; }
 
-# ============================================================================
+# AI tools (Claude Code, Ollama, OpenCode)
+
+# Fetch a vendor install script over pinned-TLS HTTPS and run it from a temp
+# file. No upstream SHA to pin, so a shebang check guards against a truncated
+# download and detached stdin keeps the installer off the caller's input.
+_run_web_installer() {
+  local label="$1" url="$2" interp="${3:-bash}"
+  local tmp="" err="" rc=0
+  if ! tmp="$(mktemp "${TMPDIR:-/tmp}/macsmith-inst.XXXXXX")"; then
+    fail "$label: could not create a temp file"; return 1
+  fi
+  DT_TMP_FILES+=("$tmp")
+  if ! /usr/bin/curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2 \
+        -fsSL "$url" -o "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; fail "$label: download failed"; return 1
+  fi
+  if ! /usr/bin/head -n1 "$tmp" | /usr/bin/grep -q '^#!'; then
+    rm -f "$tmp"; fail "$label: downloaded installer has no shebang; refusing to run it"; return 1
+  fi
+  err="$( { "$interp" "$tmp" </dev/null >/dev/null; } 2>&1 )"; rc=$?
+  rm -f "$tmp"
+  if (( rc != 0 )); then
+    fail "$label installation failed$(_brew_fail_hint "$err")"; return 1
+  fi
+  return 0
+}
+
+install_claude() {
+  if command -v claude >/dev/null 2>&1; then
+    echo "${GREEN}✅ Claude Code already installed${NC}"
+    return 0
+  fi
+  if [[ "$CHECK_MODE" == true ]]; then
+    echo "${YELLOW}📦 Claude Code: Would install via official installer${NC}"
+    return 0
+  fi
+  if _ask_user "${YELLOW}📦 Claude Code (Anthropic's AI assistant) not found. Install via official installer?" "Y"; then
+    if _run_web_installer "Claude Code" "https://claude.ai/install.sh" bash; then
+      echo "${GREEN}✅ Claude Code installed${NC}"
+    fi
+  fi
+}
+
+install_ollama() {
+  if command -v ollama >/dev/null 2>&1; then
+    echo "${GREEN}✅ Ollama already installed${NC}"
+    return 0
+  fi
+  if [[ "$CHECK_MODE" == true ]]; then
+    echo "${YELLOW}📦 Ollama: Would install via official installer${NC}"
+    return 0
+  fi
+  if _ask_user "${YELLOW}📦 Ollama (local LLM runner) not found. Install via official installer?" "Y"; then
+    if _run_web_installer "Ollama" "https://ollama.com/install.sh" sh; then
+      echo "${GREEN}✅ Ollama installed${NC}"
+    fi
+  fi
+}
+
+install_opencode() {
+  if command -v opencode >/dev/null 2>&1; then
+    echo "${GREEN}✅ OpenCode already installed${NC}"
+    return 0
+  fi
+  if [[ "$CHECK_MODE" == true ]]; then
+    echo "${YELLOW}📦 OpenCode: Would install via official installer${NC}"
+    return 0
+  fi
+  if _ask_user "${YELLOW}📦 OpenCode (AI coding CLI) not found. Install via official installer?" "Y"; then
+    if _run_web_installer "OpenCode" "https://opencode.ai/install" bash; then
+      echo "${GREEN}✅ OpenCode installed${NC}"
+    fi
+  fi
+}
+
+install_llm() { _install_brew_tool llm "llm (CLI for LLMs)" "Y"; }
+
 # JVM ecosystem batch (opt-in)
-# ============================================================================
 
 install_jvm_ecosystem() {
   if [[ "$CHECK_MODE" == true ]]; then
@@ -1200,6 +1274,10 @@ test_detection() {
     "go:Go"
     "java:Java"
     "dotnet:.NET SDK"
+    "claude:Claude Code"
+    "ollama:Ollama"
+    "opencode:OpenCode"
+    "llm:llm"
   )
   
   for tool_info in "${tools[@]}"; do
@@ -1222,7 +1300,7 @@ test_detection() {
               found_via_brew=true
             fi
             ;;
-          pipx|pyenv|go|chruby|ruby-install|uv|bun|pnpm|deno)
+          pipx|pyenv|go|chruby|ruby-install|uv|bun|pnpm|deno|ollama|llm)
             if "$HOMEBREW_PREFIX/bin/brew" list "$tool" >/dev/null 2>&1; then
               found_via_brew=true
             fi
@@ -1274,6 +1352,20 @@ test_detection() {
             continue
           fi
           ;;
+        claude)
+          if npm list -g @anthropic-ai/claude-code >/dev/null 2>&1; then
+            echo "${GREEN}✅ $name: Found via npm global${NC}"
+            ((all_found++))
+            continue
+          fi
+          ;;
+        opencode)
+          if [[ -f "$HOME/.opencode/bin/opencode" ]]; then
+            echo "${GREEN}✅ $name: Found at $HOME/.opencode${NC}"
+            ((all_found++))
+            continue
+          fi
+          ;;
       esac
       
       if [[ "$found_via_brew" == true ]]; then
@@ -1315,6 +1407,7 @@ main() {
     echo "  - Modern JS: bun, pnpm, deno"
     echo "  - Version managers: pyenv, nvm, chruby, rustup, swiftly"
     echo "  - Runtimes: Go, Java, .NET"
+    echo "  - AI tools: Claude Code, Ollama, OpenCode, llm"
     echo "  - Opt-in: JVM extras (Kotlin/Scala/Clojure/Gradle/Maven/Groovy)"
     echo ""
     echo "Note: Version managers will also install the latest/LTS version of each language."
@@ -1345,6 +1438,13 @@ main() {
   install_go
   install_java
   install_dotnet
+
+  echo ""
+  echo "${BLUE}=== AI Tools ===${NC}"
+  install_claude
+  install_ollama
+  install_opencode
+  install_llm
 
   echo ""
   echo "${BLUE}=== Optional ===${NC}"

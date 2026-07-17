@@ -92,12 +92,13 @@ Everything optional is behind a y/n prompt with a sensible default (press Enter 
 **Asked per tool during `./install.sh`**:
 
 - macOS package sources: `mas` **[N]**, `MacPorts` **[N]**, `Nix` **[N]**
-- Sysadmin profiles: power-user CLI **[Y]** (btop, ripgrep, bat, gh, lazygit, tmux, neovim, …), crypto/secrets **[Y]** (age, sops, gnupg, pinentry-mac), netsec **[N]** (nmap, masscan, iperf3, Wireshark), devops/SRE **[N]** (kubectl, Terraform via HashiCorp tap, ansible, awscli, orbstack, …), databases **[N]** (mysql, postgresql)
+- Sysadmin profiles: power-user CLI **[Y]** (btop, ripgrep, bat, gh, lazygit, tmux, neovim, ghostty, …), crypto/secrets **[Y]** (age, sops, gnupg, pinentry-mac), netsec **[N]** (nmap, masscan, iperf3, Wireshark), devops/SRE **[N]** (kubectl, Terraform via HashiCorp tap, ansible, awscli, powershell, orbstack, …), databases **[N]** (mysql, postgresql)
 
 **Asked per tool during `./dev-tools.sh`**:
 
 - Languages **[Y]**: Python (pyenv + pipx + uv), Node (nvm + pnpm + bun), Ruby (chruby + ruby-install), Rust (rustup), Go
 - Languages **[N]**: Swift (swiftly), Java (openjdk), .NET SDK, Conda/Miniforge, deno
+- AI tools **[Y]**: Claude Code, Ollama, OpenCode (via official installers), llm (via Homebrew)
 - JVM extras batch **[N]**: Kotlin, Scala, Clojure, Gradle, Maven, Groovy
 
 **Maintenance**: `update` keeps every formula, cask, and language runtime current; `verify` shows gaps. Project-local files (`package.json`, `go.mod`, `.swift-version`, …) are never touched.
@@ -121,10 +122,10 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 **Written only if you say yes** (per-tool `[Y]`/`[N]` prompt):
 
 - **Homebrew packages**, by profile:
-  - `power-user` **[Y]**: 24 formulae (btop, ripgrep, bat, gh, lazygit, tmux, neovim, chezmoi, …)
+  - `power-user` **[Y]**: 29 formulae + 1 cask (btop, ripgrep, bat, gh, lazygit, tmux, neovim, chezmoi, wget, just, cmake, coreutils, ghostty, …)
   - `crypto/secrets` **[Y]**: 4 formulae (age, sops, gnupg, pinentry-mac)
   - `netsec` **[N]**: 3 formulae + 1 cask (nmap, masscan, iperf3, Wireshark app) — strictly network-layer tools; web-app / DB-exploit scanners are deliberately excluded
-  - `devops/SRE` **[N]**: 17 formulae + 3 casks (kubectl, Terraform via `hashicorp/tap`, ansible, awscli, docker, orbstack, google-cloud-sdk, multipass, …)
+  - `devops/SRE` **[N]**: 18 formulae + 3 casks (kubectl, Terraform via `hashicorp/tap`, ansible, awscli, docker, powershell, orbstack, google-cloud-sdk, multipass, …)
   - `databases` **[N]**: 2 formulae (mysql, postgresql@17)
 - **Language toolchains** (via `./dev-tools.sh`, each one its own `[Y]`/`[N]` prompt):
   - Python → `~/.pyenv/`

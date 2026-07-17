@@ -1250,6 +1250,8 @@ install_sysadmin_tools() {
   # shellcheck disable=SC2296  # ${(f)...} is zsh newline splitting
   local poweruser=("${(@f)$(_profile_packages power-user formula)}")
   # shellcheck disable=SC2296
+  local poweruser_casks=("${(@f)$(_profile_packages power-user cask)}")
+  # shellcheck disable=SC2296
   local crypto_formulae=("${(@f)$(_profile_packages crypto formula)}")
   # shellcheck disable=SC2296
   local netsec_formulae=("${(@f)$(_profile_packages netsec formula)}")
@@ -1310,6 +1312,7 @@ install_sysadmin_tools() {
       orbstack)       echo "OrbStack.app" ;;
       wireshark-app)  echo "Wireshark.app" ;;
       multipass)      echo "Multipass.app" ;;
+      ghostty)        echo "Ghostty.app" ;;
       *)              echo "" ;;
     esac
   }
@@ -1404,12 +1407,13 @@ install_sysadmin_tools() {
   echo ""
   echo "${BLUE}=== Extra tooling (profiles) ===${NC}"
 
-  if _profile_complete --formula "${poweruser[@]}"; then
+  if _profile_complete --formula "${poweruser[@]}" --cask "${poweruser_casks[@]}"; then
     echo "${GREEN}✅ Power-user tools already installed (skipping prompt)${NC}"
-  elif _ask_user "${YELLOW}📦 Install power-user CLI (btop, gh, lazygit, ripgrep, bat, jq, chezmoi, neovim, mole, ...)?" "Y"; then
+  elif _ask_user "${YELLOW}📦 Install power-user CLI (btop, gh, lazygit, ripgrep, bat, jq, chezmoi, neovim, mole, wget, just, gcc, cmake, coreutils, ghostty, ...)?" "Y"; then
     echo "  ${BLUE}INFO:${NC} mole is provided by the tw93/tap Homebrew tap"
     profile_failures=0
     _brew_batch "power-user" "${poweruser[@]}"
+    _brew_batch_cask "power-user-casks" "${poweruser_casks[@]}"
     _profile_done "Power-user tools"
   fi
 
@@ -1432,7 +1436,7 @@ install_sysadmin_tools() {
 
   if _profile_complete --formula "${devops_formulae[@]}" --cask "${devops_casks[@]}"; then
     echo "${GREEN}✅ DevOps/SRE tools already installed (skipping prompt)${NC}"
-  elif _ask_user "${YELLOW}📦 Install DevOps/SRE tools (kubectl, Terraform, ansible, awscli, gcloud, k9s, ...)?" "N"; then
+  elif _ask_user "${YELLOW}📦 Install DevOps/SRE tools (kubectl, Terraform, ansible, awscli, gcloud, k9s, powershell, ...)?" "N"; then
     echo "  ${BLUE}INFO:${NC} Terraform is provided by HashiCorp's Homebrew tap"
     profile_failures=0
     if ! "$brew" tap hashicorp/tap </dev/null >/dev/null 2>&1; then

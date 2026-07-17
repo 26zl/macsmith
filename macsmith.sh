@@ -17,7 +17,7 @@ else
   readonly NC='\033[0m' # No Color
 fi
 
-# ================================ SYSTEM COMPATIBILITY ====================
+# SYSTEM COMPATIBILITY
 
 _check_macos_compatibility() {
   # Verify we're running on macOS
@@ -241,7 +241,7 @@ _is_system_ruby() {
   return 1
 }
 
-# ================================ RUBY GEM COMPATIBILITY ===================
+# RUBY GEM COMPATIBILITY
 
 _fix_all_ruby_gems() {
   echo "${GREEN}[Ruby]${NC} Auto-fixing Ruby gems for compatibility..."
@@ -370,7 +370,7 @@ _fix_all_ruby_gems() {
   (( failed_count == 0 ))
 }
 
-# ================================ PYTHON COMPATIBILITY =====================
+# PYTHON COMPATIBILITY
 
 _conda_update_base() {
   # Update the base environment and report failures through zsh dynamic scope.
@@ -490,7 +490,7 @@ PY
   fi
 }
 
-# ================================ GO HELPERS =============================
+# GO HELPERS
 
 # Remove the legacy version-locked Homebrew Go block from .zprofile.
 _remove_go_permanent() {
@@ -546,7 +546,7 @@ _remove_go_permanent() {
   return 0
 }
 
-# ================================ PYENV HELPERS =============================
+# PYENV HELPERS
 
 _pyenv_latest_available() {
   # Cache the result to avoid slow network calls
@@ -596,7 +596,7 @@ _pyenv_activate_latest() {
   printf "%s" "$target"
 }
 
-# ================================ CHRUBY HELPERS =============================
+# CHRUBY HELPERS
 
 _chruby_latest_available() {
   # Cache the result to avoid slow network calls
@@ -652,7 +652,7 @@ _chruby_install_latest() {
   echo "ruby-$latest"
 }
 
-# ================================ GO HELPERS ==================================
+# GO HELPERS
 
 _go_update_toolchain() {
   command -v go >/dev/null 2>&1 || return 1
@@ -927,7 +927,7 @@ _cargo_update_packages() {
   fi
 }
 
-# ================================ UPDATE ===================================
+# UPDATE
 
 _update_impl() {
   # Route named targets to minimal updates and `all` to the full update path.
@@ -957,9 +957,7 @@ _update_impl() {
       return $?
       ;;
     node|nvm|npm)
-      # Use NVM_DIR (custom/Homebrew installs) and `type` (nvm is a function),
-      # matching the full-update path; the old command-v + hardcoded ~/.nvm
-      # falsely reported "nvm not installed" for a custom $NVM_DIR.
+      # Detect nvm via NVM_DIR and `type` (nvm is a function) so a custom $NVM_DIR is honored.
       local _nvm_sh="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
       if ! type nvm >/dev/null 2>&1 && [[ ! -s "$_nvm_sh" ]]; then
         echo "${RED}[Node]${NC} nvm not installed"; return 1
@@ -1065,6 +1063,48 @@ _update_impl() {
       mas upgrade
       return $?
       ;;
+    claude|claude-code)
+      if ! command -v claude >/dev/null 2>&1; then
+        echo "${RED}[Claude Code]${NC} not installed"; return 1
+      fi
+      echo "${GREEN}[Claude Code]${NC} update"
+      claude update
+      return $?
+      ;;
+    ollama)
+      if ! command -v ollama >/dev/null 2>&1; then
+        echo "${RED}[Ollama]${NC} not installed"; return 1
+      fi
+      echo "${GREEN}[Ollama]${NC} update via official installer"
+      # curl carries --fail; capture its status directly so a failed download
+      # isn't masked by sh reading empty stdin and exiting 0.
+      local _ollama_installer=""
+      if ! _ollama_installer="$(_curl_safe -fsSL https://ollama.com/install.sh)" || [[ -z "$_ollama_installer" ]]; then
+        echo "${RED}[Ollama]${NC} installer download failed"; return 1
+      fi
+      printf '%s\n' "$_ollama_installer" | sh
+      return $?
+      ;;
+    opencode)
+      if ! command -v opencode >/dev/null 2>&1; then
+        echo "${RED}[OpenCode]${NC} not installed"; return 1
+      fi
+      echo "${GREEN}[OpenCode]${NC} upgrade"
+      opencode upgrade
+      return $?
+      ;;
+    llm)
+      if ! command -v llm >/dev/null 2>&1; then
+        echo "${RED}[llm]${NC} not installed"; return 1
+      fi
+      if command -v brew >/dev/null 2>&1 && brew list llm >/dev/null 2>&1; then
+        echo "${GREEN}[llm]${NC} brew upgrade llm"
+        brew upgrade llm
+        return $?
+      fi
+      echo "${BLUE}[llm]${NC} not managed by Homebrew — update via its own manager (pipx/uv/pip)"
+      return 0
+      ;;
     help|-h|--help)
       cat <<EOF
 Usage: update [target]
@@ -1086,6 +1126,10 @@ Targets:
   dotnet | net        dotnet workload + global tools update
   nix                 nix profile upgrade + gc
   mas                 mas upgrade
+  claude | claude-code claude update
+  ollama              official installer update
+  opencode            opencode upgrade
+  llm                 brew upgrade llm
   help                This message
 
 Environment:
@@ -2683,6 +2727,31 @@ except Exception:
     fi
   fi
 
+  # AI tools
+  if command -v claude >/dev/null 2>&1; then
+    echo "${GREEN}[Claude Code]${NC} update"
+    claude update || _update_failed=1
+  fi
+  if command -v ollama >/dev/null 2>&1; then
+    echo "${GREEN}[Ollama]${NC} update via official installer"
+    local _ollama_installer=""
+    if _ollama_installer="$(_curl_safe -fsSL https://ollama.com/install.sh)" && [[ -n "$_ollama_installer" ]]; then
+      printf '%s\n' "$_ollama_installer" | sh || _update_failed=1
+    else
+      echo "${RED}[Ollama]${NC} installer download failed"; _update_failed=1
+    fi
+  fi
+  if command -v opencode >/dev/null 2>&1; then
+    echo "${GREEN}[OpenCode]${NC} upgrade"
+    opencode upgrade || _update_failed=1
+  fi
+  if command -v llm >/dev/null 2>&1; then
+    if command -v brew >/dev/null 2>&1 && brew list llm >/dev/null 2>&1; then
+      echo "${GREEN}[llm]${NC} brew upgrade llm"
+      brew upgrade llm || _update_failed=1
+    fi
+  fi
+
   hash -r 2>/dev/null || true
   _ensure_system_path
   echo "${GREEN}==> Update finished $(date)${NC}"
@@ -2697,7 +2766,7 @@ _run_update_from_safe_cwd() {
       _update_impl "$@"
       return $?
       ;;
-    all|brew|homebrew|macports|node|nvm|npm|python|pyenv|pipx|conda|ruby|chruby|rubygems|gem|rust|rustup|cargo|swift|swiftly|go|golang|dotnet|net|nix|mas)
+    all|brew|homebrew|macports|node|nvm|npm|python|pyenv|pipx|conda|ruby|chruby|rubygems|gem|rust|rustup|cargo|swift|swiftly|go|golang|dotnet|net|nix|mas|claude|claude-code|ollama|opencode|llm)
       ;;
     *)
       _update_impl "$@"
@@ -2774,7 +2843,7 @@ update() {
   _run_update_from_safe_cwd "$@"
 }
 
-# ================================ VERIFY ===================================
+# VERIFY
 
 # Time-limit version probes and detach stdin to prevent interactive hangs.
 _probe() { perl -e 'alarm shift; exec @ARGV' 10 "$@" </dev/null; }
@@ -3188,6 +3257,13 @@ verify() {
       if [[ -n "$_ver" ]]; then ok "$_tool" "$_ver"; else warn "$_tool" "version probe failed/timed out"; fi
     fi
   done
+  # Probe AI tools.
+  for _tool in claude ollama opencode llm; do
+    if command -v "$_tool" >/dev/null 2>&1; then
+      _ver="$(_probe "$_tool" --version 2>/dev/null | head -n1)"
+      if [[ -n "$_ver" ]]; then ok "$_tool" "$_ver"; else warn "$_tool" "version probe failed/timed out"; fi
+    fi
+  done
   # Probe each JVM tool according to its version-output format.
   for _tool in kotlin scala clojure gradle mvn groovy; do
     if command -v "$_tool" >/dev/null 2>&1; then
@@ -3219,7 +3295,7 @@ verify() {
   return 0
 }
 
-# ================================ VERSIONS ===================================
+# VERSIONS
 
 versions() {
   _ensure_system_path
@@ -3615,6 +3691,20 @@ versions() {
       printf '%s %s %s\n' "$_tool" "$_dots" "$_ver"
     fi
   done
+  # Probe AI tools.
+  for _tool in claude ollama opencode llm; do
+    if command -v "$_tool" >/dev/null 2>&1; then
+      case "$_tool" in
+        claude) _ver="$(_probe claude --version 2>/dev/null | head -n1)" ;;
+        ollama) _ver="$(_probe ollama --version 2>/dev/null | head -n1)" ;;
+        opencode) _ver="$(_probe opencode --version 2>/dev/null | head -n1)" ;;
+        llm) _ver="$(_probe llm --version 2>/dev/null | head -n1)" ;;
+      esac
+      [[ -z "$_ver" ]] && _ver="(probe timed out)"
+      _dots="$(printf '%*s' $((15 - ${#_tool})) '' | tr ' ' '.')"
+      printf '%s %s %s\n' "$_tool" "$_dots" "$_ver"
+    fi
+  done
   # Probe JVM tools with the same special cases as verify().
   for _tool in kotlin scala clojure gradle mvn groovy; do
     if command -v "$_tool" >/dev/null 2>&1; then
@@ -3634,7 +3724,7 @@ versions() {
   return 0
 }
 
-# ================================ SELF-UPGRADE =============================
+# SELF-UPGRADE
 
 readonly GITHUB_REPO="26zl/macsmith"
 readonly DATA_DIR="$HOME/.local/share/macsmith"
@@ -4081,7 +4171,7 @@ _self_upgrade() {
   echo "  Restart your terminal to apply changes."
 }
 
-# ================================ DOCTOR ===================================
+# DOCTOR
 # Read-only diagnostics for common setup failures.
 doctor() {
   local issues=0
@@ -4194,7 +4284,7 @@ doctor() {
   return $(( issues > 0 ))
 }
 
-# ================================ UNINSTALL-PROFILE ========================
+# UNINSTALL-PROFILE
 # Brew-uninstall packages from the same manifest used by install.sh.
 uninstall_profile() {
   local profile="${1:-}"
@@ -4233,6 +4323,11 @@ EOF
   formulae=("${(@f)$(awk -F'|' -v profile="$profile" '$1 == profile && $2 == "formula" { print $3 }' "$profile_manifest")}")
   # shellcheck disable=SC2296
   casks=("${(@f)$(awk -F'|' -v profile="$profile" '$1 == profile && $2 == "cask" { print $3 }' "$profile_manifest")}")
+  # Drop the empty-string element zsh yields when a profile has no rows of a kind.
+  # shellcheck disable=SC2296
+  formulae=("${(@)formulae:#}")
+  # shellcheck disable=SC2296
+  casks=("${(@)casks:#}")
 
   echo "${YELLOW}About to uninstall $profile profile:${NC}"
   (( ${#formulae[@]} > 0 )) && echo "  formulae: ${formulae[*]}"
@@ -4286,7 +4381,7 @@ EOF
   return 0
 }
 
-# ================================ MAIN =====================================
+# MAIN
 # Lock mutating commands inside the private data directory.
 LOCK_FILE=""
 case "${1:-}" in

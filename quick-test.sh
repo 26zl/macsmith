@@ -366,14 +366,11 @@ fi
 
 rm -rf "$qt_tmp_root"
 
-# ---------------------------------------------------------------------------
 # Keep regression reporting in the main shell so failures affect the suite status.
 qt_pass() { echo "${GREEN}✅ OK: $1${NC}"; }
 qt_fail() { echo "FAIL: $1"; test_failed=1; }
 
-# ---------------------------------------------------------------------------
 # 5. Verify the zprofile extractor contract and _curl_safe presence (M13).
-# ---------------------------------------------------------------------------
 echo ""
 echo "5. Testing zprofile extractor contract + _curl_safe (M13)..."
 # Tolerate both the unescaped heredoc marker (install.sh) and the escaped
@@ -410,9 +407,7 @@ else
   qt_fail "M13: macsmith.sh is missing the _curl_safe helper"
 fi
 
-# ---------------------------------------------------------------------------
 # 6. Replay install.sh's secret-export classification with its actual regexes (M14).
-# ---------------------------------------------------------------------------
 echo ""
 echo "6. Testing secret-export harvest filter (M14)..."
 qt_extract_install_local() {
@@ -455,9 +450,7 @@ else
   fi
 fi
 
-# ---------------------------------------------------------------------------
 # 7. Verify that runtime pruning accepts only explicit true values (M15).
-# ---------------------------------------------------------------------------
 echo ""
 echo "7. Testing runtime-cleanup gating via _is_enabled (M15)..."
 m15_src="$(awk '/^_is_enabled\(\) \{/{p=1} p{print} p&&/^\}/{exit}' "$repo_root/macsmith.sh")"
@@ -483,9 +476,7 @@ else
   fi
 fi
 
-# ---------------------------------------------------------------------------
 # 8. Verify selection of the oldest non-macsmith .zshrc backup in a dry run (M16).
-# ---------------------------------------------------------------------------
 echo ""
 echo "8. Testing uninstall-macsmith restore-selection (M16)..."
 m16_tmp="$(mktemp -d 2>/dev/null || mktemp -d -t macsmith-m16)"
@@ -510,9 +501,7 @@ else
 fi
 rm -rf "$m16_tmp"
 
-# ---------------------------------------------------------------------------
 # 9. Verify strict confirmation and exact Nix Store APFS detection (M17).
-# ---------------------------------------------------------------------------
 echo ""
 echo "9. Testing uninstall-nix strict_confirm + APFS detection (M17)..."
 m17_strict_src="$(awk '/^strict_confirm\(\) \{/{p=1} p{print} p&&/^\}/{exit}' "$repo_root/scripts/uninstall-nix-macos.sh")"

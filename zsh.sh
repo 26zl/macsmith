@@ -4,7 +4,7 @@
 # zsh plugins (syntax-highlighting, autosuggestions) are sourced near the end
 # from Homebrew directly — no Oh My Zsh, no clones in $HOME.
 
-# ================================ PATH =====================================
+# PATH
 # Detect Homebrew installation prefix
 _detect_brew_prefix() {
   if [[ -d /opt/homebrew ]]; then
@@ -112,8 +112,10 @@ fi
 # Add ~/.local/bin to PATH
 local_bin="$HOME/.local/bin"
 _add_to_path "$local_bin"
+# opencode's official installer drops its binary here (its INSTALL_DIR).
+[[ -d "$HOME/.opencode/bin" ]] && _add_to_path "$HOME/.opencode/bin"
 
-# ================================ chruby/Ruby ===============================
+# chruby/Ruby
 for _chruby_path in \
   "/opt/homebrew/opt/chruby/share/chruby/chruby.sh" \
   "/usr/local/opt/chruby/share/chruby/chruby.sh" \
@@ -178,7 +180,7 @@ _setup_gem_path
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd _setup_gem_path
 
-# ================================== pyenv ==================================
+# pyenv
 export PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
 [[ -d "$PYENV_ROOT/bin" ]] && _add_to_path "$PYENV_ROOT/bin"
 
@@ -239,7 +241,7 @@ if command -v pyenv >/dev/null 2>&1; then
   unset -f _set_pipx_python
 fi
 
-# ================================== nvm ====================================
+# nvm
 # Inline self-contained NVM lazy loading into each Node command shim.
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 
@@ -280,15 +282,15 @@ corepack() {
   command corepack "$@"
 }
 
-# ================================= Rust ====================================
+# Rust
 [[ -s "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 
-# ================================== Go =====================================
+# Go
 # `go install` drops binaries in $GOPATH/bin (default ~/go/bin); put it on PATH.
 go_bin="${GOPATH:-$HOME/go}/bin"
 [[ -d "$go_bin" ]] && _add_to_path "$go_bin"
 
-# ================================ conda/miniforge ===========================
+# conda/miniforge
 # Initialize conda/miniforge if installed but not already in PATH
 if ! command -v conda >/dev/null 2>&1; then
   [[ -n "${HOMEBREW_PREFIX:-}" ]] || HOMEBREW_PREFIX="$(_detect_brew_prefix)"
@@ -313,7 +315,7 @@ if ! command -v conda >/dev/null 2>&1; then
   done
 fi
 
-# ================================ ALIASES ==================================
+# ALIASES
 # eza is installed by the power-user profile; prefer it when present.
 # colorls (Ruby gem, user-installed) is a fallback for users who already had it.
 if command -v eza >/dev/null 2>&1; then
@@ -441,7 +443,7 @@ if [[ -n "$openjdk_path" && -d "$openjdk_path" ]]; then
   _add_to_path "$openjdk_path"
 fi
 
-# ================================ UPDATE ===================================
+# UPDATE
 # update/verify/versions live in the macsmith binary; alias to it.
 macsmith_bin="$HOME/.local/bin/macsmith"
 if [[ -x "$macsmith_bin" ]]; then
@@ -464,13 +466,13 @@ if [[ -x "$uninstall_macsmith_bin" ]]; then
   alias uninstall-macsmith="$uninstall_macsmith_bin"
 fi
 
-# ================================ Swiftly ===================================
+# Swiftly
 # Source swiftly env if available 
 if [[ -f "$HOME/.swiftly/env.sh" ]]; then
   source "$HOME/.swiftly/env.sh" 2>/dev/null || true
 fi
 
-# ================================ FZF ======================================
+# FZF
 # Load FZF from Homebrew with fallbacks for existing user installs.
 [[ -n "${HOMEBREW_PREFIX:-}" ]] || HOMEBREW_PREFIX="$(_detect_brew_prefix)"
 if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -d "$HOMEBREW_PREFIX/opt/fzf/shell" ]]; then
@@ -484,7 +486,7 @@ else
   [[ -f "$fzf_config" ]] && source "$fzf_config"
 fi
 
-# ================================ UPDATE CHECK =============================
+# UPDATE CHECK
 # Run the opt-in daily update check asynchronously and notify at the first prompt.
 if [[ "${MACSMITH_UPDATE_CHECK:-0}" == "1" ]]; then
   _macsmith_data="$HOME/.local/share/macsmith"
@@ -546,19 +548,19 @@ else
   export PATH="$(_clean_path)" >/dev/null 2>&1
 fi
 
-# ================================ TOOL HOOKS ===============================
+# TOOL HOOKS
 # zoxide and direnv require shell hooks to function — without them the
 # binaries are dead weight on disk.
 command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init zsh)"
 command -v direnv >/dev/null 2>&1 && eval "$(direnv hook zsh)"
 
-# ================================ STARSHIP PROMPT ==========================
+# STARSHIP PROMPT
 # Initialize Starship before plugins so syntax highlighting wraps every prompt widget.
 if command -v starship >/dev/null 2>&1; then
   eval "$(starship init zsh)"
 fi
 
-# ================================ ZSH PLUGINS ==============================
+# ZSH PLUGINS
 # Load autosuggestions before syntax highlighting so the latter wraps all ZLE widgets.
 if [[ -n "$HOMEBREW_PREFIX" ]]; then
   [[ -f "$HOMEBREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]] && \

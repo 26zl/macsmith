@@ -4,9 +4,7 @@
 set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
-# --------------------------------------------------------------------------
 # Colours + logging
-# --------------------------------------------------------------------------
 if [[ -n "${NO_COLOR:-}" ]]; then
   readonly RED='' GREEN='' YELLOW='' BLUE='' NC=''
 else
@@ -21,9 +19,7 @@ log_err()     { printf '%b[FAIL]%b %s\n'  "$RED"    "$NC" "$*" >&2; }
 log_dry()     { printf '%b[DRY ]%b %s\n'  "$YELLOW" "$NC" "$*"; }
 log_section() { printf '\n%b== %s ==%b\n' "$BLUE"   "$*" "$NC"; }
 
-# --------------------------------------------------------------------------
 # CLI args
-# --------------------------------------------------------------------------
 DRY_RUN=0
 ASSUME_YES=0
 ORIGINAL_ARGV=("$@")
@@ -64,9 +60,7 @@ USAGE
   esac
 done
 
-# --------------------------------------------------------------------------
 # Platform + command prerequisites
-# --------------------------------------------------------------------------
 if [[ "$(uname -s)" != "Darwin" ]]; then
   log_err "This script is macOS-only. Detected: $(uname -s)"
   exit 1
@@ -82,10 +76,8 @@ if (( ${#_missing[@]} > 0 )); then
 fi
 unset _missing _cmd
 
-# --------------------------------------------------------------------------
 # Re-exec under sudo (real runs only — dry-run should work rootless so you
 # can inspect the plan without typing a password)
-# --------------------------------------------------------------------------
 if [[ $EUID -ne 0 ]]; then
   if [[ $DRY_RUN -eq 1 ]]; then
     log_info "Dry-run: not re-execing under sudo; some inspections may be limited."
@@ -100,9 +92,7 @@ if [[ $EUID -ne 0 ]]; then
   fi
 fi
 
-# --------------------------------------------------------------------------
 # Shared state
-# --------------------------------------------------------------------------
 TS="$(date +%Y%m%d-%H%M%S)"
 ERRORS=0
 
@@ -121,9 +111,7 @@ else
   USER_HOME="${HOME:-}"
 fi
 
-# --------------------------------------------------------------------------
 # Helpers
-# --------------------------------------------------------------------------
 
 # Run a command or display its shell-quoted dry-run form.
 run() {
@@ -218,9 +206,7 @@ safe_rm() {
   fi
 }
 
-# --------------------------------------------------------------------------
 # Determinate Systems installer shortcut
-# --------------------------------------------------------------------------
 if [[ -x /nix/nix-installer ]]; then
   log_section "Determinate Systems installer detected"
   log_info  "/nix/nix-installer is present. This is the canonical uninstaller"
@@ -239,9 +225,7 @@ if [[ -x /nix/nix-installer ]]; then
   log_warn "User chose to continue with the manual path. OK, proceeding."
 fi
 
-# --------------------------------------------------------------------------
 # Pre-flight summary
-# --------------------------------------------------------------------------
 log_section "Planned actions"
 cat <<EOF
   1. Unload + remove:
@@ -268,9 +252,7 @@ if ! confirm "Proceed?"; then
   exit 0
 fi
 
-# --------------------------------------------------------------------------
 # 1. Launch daemons
-# --------------------------------------------------------------------------
 log_section "1. Unloading Nix launch daemons"
 for _plist in \
     /Library/LaunchDaemons/org.nixos.nix-daemon.plist \
@@ -306,9 +288,7 @@ for _plist in \
 done
 unset _plist
 
-# --------------------------------------------------------------------------
 # 2. nixbld users + group
-# --------------------------------------------------------------------------
 log_section "2. Removing _nixbld* users and nixbld group"
 # `|| true` absorbs grep's exit 1 when no match (pipefail is on).
 _nixbld_list="$(dscl . -list /Users 2>/dev/null \
@@ -335,9 +315,7 @@ else
   log_info "skip (not present): /Groups/nixbld"
 fi
 
-# --------------------------------------------------------------------------
 # 3. Nix directories and per-user state
-# --------------------------------------------------------------------------
 log_section "3. Removing Nix config and per-user state"
 safe_rm /etc/nix || ERRORS=$((ERRORS + 1))
 safe_rm /var/root/.nix-profile || ERRORS=$((ERRORS + 1))
@@ -351,9 +329,7 @@ else
   log_info "invoking-user home unresolved — skipping per-user state"
 fi
 
-# --------------------------------------------------------------------------
 # 4. /etc/synthetic.conf
-# --------------------------------------------------------------------------
 # Track real backups and edits separately from dry-run output.
 SYNTHETIC_BACKUP=""
 SYNTHETIC_BACKUP_CREATED=0
@@ -398,9 +374,7 @@ else
   log_info "skip (not present): $SYNTHETIC"
 fi
 
-# --------------------------------------------------------------------------
 # 5. /etc/fstab
-# --------------------------------------------------------------------------
 log_section "5. Cleaning /etc/fstab"
 FSTAB=/etc/fstab
 if [[ -f "$FSTAB" ]]; then
@@ -438,9 +412,7 @@ else
   log_info "skip (not present): $FSTAB"
 fi
 
-# --------------------------------------------------------------------------
 # 6. APFS volume
-# --------------------------------------------------------------------------
 log_section "6. Nix APFS volume"
 
 # Detection order:
@@ -537,9 +509,7 @@ else
   fi
 fi
 
-# --------------------------------------------------------------------------
 # Done
-# --------------------------------------------------------------------------
 if [[ $ERRORS -gt 0 ]]; then
   log_section "Uninstall incomplete ($ERRORS error(s))"
 else
