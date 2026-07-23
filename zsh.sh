@@ -465,6 +465,10 @@ uninstall_macsmith_bin="$HOME/.local/bin/uninstall-macsmith"
 if [[ -x "$uninstall_macsmith_bin" ]]; then
   alias uninstall-macsmith="$uninstall_macsmith_bin"
 fi
+setup_github_bin="$HOME/.local/bin/setup-github"
+if [[ -x "$setup_github_bin" ]]; then
+  alias setup-github="$setup_github_bin"
+fi
 
 # Swiftly
 # Source swiftly env if available 

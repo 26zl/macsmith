@@ -2,7 +2,7 @@
 # uninstall-macsmith.sh — remove macsmith artifacts from your home directory.
 #
 # Removes only what macsmith installed:
-#   - ~/.local/bin/macsmith, uninstall-nix-macos, uninstall-macsmith
+#   - ~/.local/bin/macsmith, uninstall-nix-macos, setup-github, uninstall-macsmith
 #   - ~/.local/share/macsmith/ (install-state, version, script copies)
 #   - The "Managed by macsmith" PATH block in ~/.zprofile (backup first)
 #   - Optionally: restores ~/.zshrc from the oldest non-macsmith-managed backup
@@ -147,6 +147,7 @@ safe_rm() {
     "$LOCAL_BIN/macsmith") ;;
     "$LOCAL_BIN/uninstall-nix-macos") ;;
     "$LOCAL_BIN/uninstall-macsmith") ;;
+    "$LOCAL_BIN/setup-github") ;;
     "$DATA_DIR"|"$DATA_DIR"/*) ;;
     "$STARSHIP_CONFIG") ;;
     *)
@@ -177,6 +178,7 @@ cat <<EOF
   1. Remove macsmith binaries from $LOCAL_BIN:
        - macsmith
        - uninstall-nix-macos (if installed)
+       - setup-github (if installed)
        - uninstall-macsmith (this script — removed last)
   2. Remove $DATA_DIR
   3. Strip the "Managed by macsmith" block from $ZPROFILE (backup first)
@@ -201,6 +203,7 @@ fi
 log_section "1. Removing macsmith binaries"
 safe_rm "$LOCAL_BIN/macsmith" || ERRORS=$((ERRORS + 1))
 safe_rm "$LOCAL_BIN/uninstall-nix-macos" || ERRORS=$((ERRORS + 1))
+safe_rm "$LOCAL_BIN/setup-github" || ERRORS=$((ERRORS + 1))
 # uninstall-macsmith (self) is handled at the very end.
 
 # 2. Data dir

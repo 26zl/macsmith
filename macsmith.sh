@@ -4086,7 +4086,7 @@ _self_upgrade() {
   if [[ -d "$extract_dir/scripts" ]]; then
     mkdir -p "$DATA_DIR/scripts"
     local _helper
-    for _helper in nix-macos-maintenance.sh uninstall-nix-macos.sh uninstall-macsmith.sh; do
+    for _helper in nix-macos-maintenance.sh uninstall-nix-macos.sh uninstall-macsmith.sh setup-github.sh; do
       if [[ -f "$extract_dir/scripts/$_helper" ]]; then
         if ! cp "$extract_dir/scripts/$_helper" "$DATA_DIR/scripts/$_helper"; then
           echo "  ${RED}Failed: $DATA_DIR/scripts/$_helper${NC}"
@@ -4099,7 +4099,7 @@ _self_upgrade() {
     local _bin
     local _local_bin="$HOME/.local/bin"
     mkdir -p "$_local_bin"
-    for _bin in uninstall-nix-macos uninstall-macsmith; do
+    for _bin in uninstall-nix-macos uninstall-macsmith setup-github; do
       if [[ -f "$extract_dir/scripts/$_bin.sh" ]]; then
         # Atomic-ish: write to tempfile next to target, chmod, mv over.
         local _tmp="$_local_bin/.$_bin.$$.tmp"

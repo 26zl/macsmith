@@ -957,7 +957,7 @@ setup_macsmith() {
     if [[ -d "$script_dir/scripts" ]]; then
       mkdir -p "$data_dir/scripts"
       local helper_file
-      for helper_file in nix-macos-maintenance.sh uninstall-nix-macos.sh uninstall-macsmith.sh; do
+      for helper_file in nix-macos-maintenance.sh uninstall-nix-macos.sh uninstall-macsmith.sh setup-github.sh; do
         if [[ -f "$script_dir/scripts/$helper_file" ]] && [[ ! "$script_dir/scripts/$helper_file" -ef "$data_dir/scripts/$helper_file" ]]; then
           if ! _atomic_copy "$script_dir/scripts/$helper_file" "$data_dir/scripts/$helper_file"; then
             warn "Could not mirror scripts/$helper_file into $data_dir"
@@ -1053,6 +1053,10 @@ setup_uninstall_nix_script() {
 
 setup_uninstall_macsmith_script() {
   _install_bundled_script uninstall-macsmith.sh uninstall-macsmith "macsmith uninstaller" uninstall-macsmith
+}
+
+setup_github_script() {
+  _install_bundled_script setup-github.sh setup-github "GitHub setup (gh login + git identity)" setup-github
 }
 
 setup_nix_path() {
@@ -1559,7 +1563,7 @@ install_zsh_config() {
       TMP_FILES+=("$harvest_all")
       grep -E '^[[:space:]]*(alias |export )' "$HOME/.zshrc" 2>/dev/null \
         | grep -vE '^[[:space:]]*export (ZSH|ZSH_THEME|plugins|PATH|NVM_DIR|PYENV_ROOT|GEM_HOME|GEM_PATH|PIPX_DEFAULT_PYTHON|HOMEBREW_PREFIX)=' \
-        | grep -vE "alias (ls|myip|flushdns|reloadzsh|reload|change|mysqlstart|mysqlstop|mysqlstatus|mysqlrestart|mysqlconnect|update|verify|versions|upgrade|sys-install|dev-tools|doctor|uninstall-profile|uninstall-nix|uninstall-macsmith|gst|gd|gds|gp|gpl|gf|gb|gco|gcb|gcm|gca|glog)=" \
+        | grep -vE "alias (ls|myip|flushdns|reloadzsh|reload|change|mysqlstart|mysqlstop|mysqlstatus|mysqlrestart|mysqlconnect|update|verify|versions|upgrade|sys-install|dev-tools|doctor|uninstall-profile|uninstall-nix|uninstall-macsmith|setup-github|gst|gd|gds|gp|gpl|gf|gb|gco|gcb|gcm|gca|glog)=" \
         > "$harvest_all" 2>/dev/null || true
 
       # Separate secret-shaped exports so they remain only in the backup.
@@ -1736,6 +1740,7 @@ main() {
   if ! setup_macsmith; then echo "${RED}❌ Critical: macsmith script installation failed${NC}"; exit 1; fi
   setup_uninstall_nix_script || { warn "Nix uninstaller install failed"; ((install_failures++)); }
   setup_uninstall_macsmith_script || { warn "macsmith uninstaller install failed"; ((install_failures++)); }
+  setup_github_script || { warn "GitHub setup script install failed"; ((install_failures++)); }
   if ! setup_zprofile_path_cleanup; then echo "${RED}❌ Critical: PATH cleanup setup failed${NC}"; exit 1; fi
   if ! install_zsh_config; then echo "${RED}❌ Critical: zsh configuration installation failed${NC}"; exit 1; fi
   if ! refresh_environment; then echo "${RED}❌ Critical: Environment refresh failed${NC}"; exit 1; fi

@@ -74,6 +74,7 @@ upgrade            # pull the latest release (SHA-256 + GitHub provenance verifi
 sys-install        # re-run install.sh (add/remove sysadmin profiles, pick up core updates)
 dev-tools          # re-run dev-tools.sh (add/remove language toolchains)
 uninstall-profile  # brew-uninstall a sysadmin profile's packages (power-user/crypto/netsec/devops/databases)
+setup-github       # log in to GitHub (gh) and derive your global git identity from the account
 uninstall-nix      # bundled macOS Nix uninstaller (--dry-run / --yes)
 uninstall-macsmith # remove macsmith itself (keeps Homebrew, language tools, your customizations)
 reload             # reload ~/.zprofile and ~/.zshrc after editing either
@@ -114,7 +115,7 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 
 - `~/.zshrc` — **overwritten** with macsmith's shell config. Previous file saved to `~/.zshrc.backup.YYYYMMDD_HHMMSS`. User-defined `alias`/`export` lines are harvested into `~/.zshrc.local` (secret-shaped exports — `*_TOKEN`, `*_SECRET`, `*_KEY` — are deliberately skipped).
 - `~/.zprofile` — managed block appended between `# FINAL PATH CLEANUP` and `# End macsmith managed block` markers. Previous file saved to `~/.zprofile.backup.YYYYMMDD_HHMMSS`.
-- `~/.local/bin/` — adds 3 binaries: `macsmith`, `uninstall-nix-macos`, `uninstall-macsmith`.
+- `~/.local/bin/` — adds 4 binaries: `macsmith`, `uninstall-nix-macos`, `uninstall-macsmith`, `setup-github`.
 - `~/.local/share/macsmith/` — created. Stores install-state marker, version file, and mirror of all repo scripts (used by `upgrade` and `uninstall-macsmith`).
 - `~/.config/starship.toml` — written **only if missing**. Existing configs are never overwritten.
 - **Homebrew** — installed at `/opt/homebrew` (Apple Silicon) or `/usr/local` (Intel) if not already present. The Homebrew installer itself requests `sudo`.
@@ -148,7 +149,7 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 
 **Reversing it**:
 
-- `uninstall-macsmith` — removes the 3 binaries, `~/.local/share/macsmith/`, the managed `.zprofile` block, and offers to restore `~/.zshrc` from the oldest non-macsmith backup. Does NOT touch Homebrew or language toolchains.
+- `uninstall-macsmith` — removes the 4 binaries, `~/.local/share/macsmith/`, the managed `.zprofile` block, and offers to restore `~/.zshrc` from the oldest non-macsmith backup. Does NOT touch Homebrew or language toolchains.
 - `uninstall-profile <name>` — `brew uninstall` a sysadmin profile's formulae + casks.
 - `uninstall-nix` — full Nix removal including the APFS volume (the volume-delete step always requires typing `yes` — `--yes` on everything else, never there).
 - Language toolchains: removed by their own tools (`rm -rf ~/.pyenv`, `brew uninstall go`, `rustup self uninstall`, …).

@@ -68,6 +68,13 @@ else
   test_failed=1
 fi
 
+if bash -n scripts/setup-github.sh; then
+  echo "${GREEN}✅ OK: scripts/setup-github.sh syntax valid${NC}"
+else
+  echo "FAIL: scripts/setup-github.sh syntax error"
+  test_failed=1
+fi
+
 echo ""
 echo "2. Testing file existence..."
 if [[ -f install.sh ]]; then
