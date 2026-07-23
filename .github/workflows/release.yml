@@ -289,8 +289,8 @@ jobs:
 
           for required in install.sh dev-tools.sh bootstrap.sh zsh.sh macsmith.sh \
             scripts/nix-macos-maintenance.sh scripts/uninstall-nix-macos.sh \
-            scripts/uninstall-macsmith.sh config/starship.toml \
-            config/profiles.conf VERSION; do
+            scripts/uninstall-macsmith.sh scripts/setup-github.sh \
+            config/starship.toml config/profiles.conf VERSION; do
             test -f "$smoke_dir/$required" || {
               echo "Missing release file: $required" >&2
               exit 1

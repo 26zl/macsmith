@@ -70,8 +70,8 @@ update [target]    # upgrade everything (default) or a single target: brew/macpo
 verify             # health-check every installed tool
 versions           # print versions on one screen
 doctor             # diagnose common setup issues (read-only)
-upgrade            # pull the latest release (SHA-256 + GitHub provenance verified)
-sys-install        # re-run install.sh (add/remove sysadmin profiles, pick up core updates)
+upgrade            # pull the latest release (SHA-256 + GitHub provenance verified; never rewrites ~/.zshrc)
+sys-install        # re-run install.sh (add/remove sysadmin profiles, apply shell-config/~/.zshrc updates)
 dev-tools          # re-run dev-tools.sh (add/remove language toolchains)
 uninstall-profile  # brew-uninstall a sysadmin profile's packages (power-user/crypto/netsec/devops/databases)
 setup-github       # log in to GitHub (gh) and derive your global git identity from the account

@@ -4082,41 +4082,41 @@ _self_upgrade() {
     fi
   done
 
-  # Refresh helper mirrors and their installed command shims.
+  # Refresh helper mirrors and their installed command shims; glob so new
+  # bundled scripts ship via upgrade without a list edit here.
   if [[ -d "$extract_dir/scripts" ]]; then
     mkdir -p "$DATA_DIR/scripts"
-    local _helper
-    for _helper in nix-macos-maintenance.sh uninstall-nix-macos.sh uninstall-macsmith.sh setup-github.sh; do
-      if [[ -f "$extract_dir/scripts/$_helper" ]]; then
-        if ! cp "$extract_dir/scripts/$_helper" "$DATA_DIR/scripts/$_helper"; then
-          echo "  ${RED}Failed: $DATA_DIR/scripts/$_helper${NC}"
-          upgrade_failed=true
-          failed_artifacts+=("$DATA_DIR/scripts/$_helper")
-        fi
-      fi
-    done
-    # Refresh the installed-bin shims. Drop the trailing .sh when placing.
-    local _bin
+    local _helper_path _helper _bin _tmp
     local _local_bin="$HOME/.local/bin"
     mkdir -p "$_local_bin"
-    for _bin in uninstall-nix-macos uninstall-macsmith setup-github; do
-      if [[ -f "$extract_dir/scripts/$_bin.sh" ]]; then
-        # Atomic-ish: write to tempfile next to target, chmod, mv over.
-        local _tmp="$_local_bin/.$_bin.$$.tmp"
-        _UPGRADE_TMP_FILES+=("$_tmp")
-        if cp "$extract_dir/scripts/$_bin.sh" "$_tmp" \
-           && chmod 755 "$_tmp" \
-           && mv -f "$_tmp" "$_local_bin/$_bin"; then
-          echo "  refreshed $_local_bin/$_bin"
-        else
-          rm -f "$_tmp" 2>/dev/null || true
-          echo "  ${RED}Failed: $_local_bin/$_bin${NC}"
-          upgrade_failed=true
-          failed_artifacts+=("$_local_bin/$_bin")
-        fi
+    for _helper_path in "$extract_dir/scripts/"*.sh; do
+      [[ -f "$_helper_path" ]] || continue
+      _helper="${_helper_path##*/}"
+      if ! cp "$_helper_path" "$DATA_DIR/scripts/$_helper"; then
+        echo "  ${RED}Failed: $DATA_DIR/scripts/$_helper${NC}"
+        upgrade_failed=true
+        failed_artifacts+=("$DATA_DIR/scripts/$_helper")
+      fi
+      # Internal maintenance helper is mirrored but never a user command.
+      if [[ "$_helper" == "nix-macos-maintenance.sh" ]]; then
+        continue
+      fi
+      # Atomic-ish: write to tempfile next to target, chmod, mv over.
+      _bin="${_helper%.sh}"
+      _tmp="$_local_bin/.$_bin.$$.tmp"
+      _UPGRADE_TMP_FILES+=("$_tmp")
+      if cp "$_helper_path" "$_tmp" \
+         && chmod 755 "$_tmp" \
+         && mv -f "$_tmp" "$_local_bin/$_bin"; then
+        echo "  refreshed $_local_bin/$_bin"
+      else
+        rm -f "$_tmp" 2>/dev/null || true
+        echo "  ${RED}Failed: $_local_bin/$_bin${NC}"
+        upgrade_failed=true
+        failed_artifacts+=("$_local_bin/$_bin")
       fi
     done
-    unset _helper _bin _tmp _local_bin
+    unset _helper_path _helper _bin _tmp _local_bin
   fi
 
   if [[ -d "$extract_dir/config" ]]; then

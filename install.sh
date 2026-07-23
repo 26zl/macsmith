@@ -953,13 +953,15 @@ setup_macsmith() {
         fi
       fi
     done
-    # Mirror helper scripts for installed uninstall commands and upgrades.
+    # Mirror every bundled helper script; glob so new scripts need no list edit.
     if [[ -d "$script_dir/scripts" ]]; then
       mkdir -p "$data_dir/scripts"
-      local helper_file
-      for helper_file in nix-macos-maintenance.sh uninstall-nix-macos.sh uninstall-macsmith.sh setup-github.sh; do
-        if [[ -f "$script_dir/scripts/$helper_file" ]] && [[ ! "$script_dir/scripts/$helper_file" -ef "$data_dir/scripts/$helper_file" ]]; then
-          if ! _atomic_copy "$script_dir/scripts/$helper_file" "$data_dir/scripts/$helper_file"; then
+      local helper_path helper_file
+      for helper_path in "$script_dir/scripts/"*.sh; do
+        [[ -f "$helper_path" ]] || continue
+        helper_file="${helper_path##*/}"
+        if [[ ! "$helper_path" -ef "$data_dir/scripts/$helper_file" ]]; then
+          if ! _atomic_copy "$helper_path" "$data_dir/scripts/$helper_file"; then
             warn "Could not mirror scripts/$helper_file into $data_dir"
             ((mirror_failures++))
           fi

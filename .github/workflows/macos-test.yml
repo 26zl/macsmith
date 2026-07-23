@@ -79,6 +79,7 @@ jobs:
           check '[ -x "$HOME/.local/bin/macsmith" ]'                           'macsmith binary installed'
           check '[ -x "$HOME/.local/bin/uninstall-macsmith" ]'                 'uninstall-macsmith installed'
           check '[ -x "$HOME/.local/bin/uninstall-nix-macos" ]'                'uninstall-nix-macos installed'
+          check '[ -x "$HOME/.local/bin/setup-github" ]'                       'setup-github installed'
           check 'grep -q "FINAL PATH CLEANUP (FOR .ZPROFILE)" "$HOME/.zprofile"' '.zprofile managed PATH block'
           check 'grep -q "macsmith_bin" "$HOME/.zshrc"'                        '.zshrc macsmith aliases'
           check 'grep -q "starship init zsh" "$HOME/.zshrc"'                   '.zshrc starship init'

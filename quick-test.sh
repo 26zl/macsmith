@@ -47,33 +47,14 @@ else
   test_failed=1
 fi
 
-if bash -n scripts/nix-macos-maintenance.sh; then
-  echo "${GREEN}✅ OK: scripts/nix-macos-maintenance.sh syntax valid${NC}"
-else
-  echo "FAIL: scripts/nix-macos-maintenance.sh syntax error"
-  test_failed=1
-fi
-
-if bash -n scripts/uninstall-nix-macos.sh; then
-  echo "${GREEN}✅ OK: scripts/uninstall-nix-macos.sh syntax valid${NC}"
-else
-  echo "FAIL: scripts/uninstall-nix-macos.sh syntax error"
-  test_failed=1
-fi
-
-if bash -n scripts/uninstall-macsmith.sh; then
-  echo "${GREEN}✅ OK: scripts/uninstall-macsmith.sh syntax valid${NC}"
-else
-  echo "FAIL: scripts/uninstall-macsmith.sh syntax error"
-  test_failed=1
-fi
-
-if bash -n scripts/setup-github.sh; then
-  echo "${GREEN}✅ OK: scripts/setup-github.sh syntax valid${NC}"
-else
-  echo "FAIL: scripts/setup-github.sh syntax error"
-  test_failed=1
-fi
+for helper_script in scripts/*.sh; do
+  if bash -n "$helper_script"; then
+    echo "${GREEN}✅ OK: $helper_script syntax valid${NC}"
+  else
+    echo "FAIL: $helper_script syntax error"
+    test_failed=1
+  fi
+done
 
 echo ""
 echo "2. Testing file existence..."

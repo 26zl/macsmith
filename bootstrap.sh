@@ -166,7 +166,8 @@ fi
 # Require every installed artifact to be a regular file.
 for required in install.sh dev-tools.sh zsh.sh macsmith.sh \
                 scripts/nix-macos-maintenance.sh scripts/uninstall-nix-macos.sh \
-                scripts/uninstall-macsmith.sh config/starship.toml; do
+                scripts/uninstall-macsmith.sh scripts/setup-github.sh \
+                config/starship.toml; do
   if [[ ! -f "$CLONE_DIR/$required" ]]; then
     printf '%bERROR: Expected file missing after clone: %s%b\n' "$RED" "$required" "$NC" >&2
     exit 1
