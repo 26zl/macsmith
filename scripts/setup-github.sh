@@ -4,6 +4,12 @@
 #   setup-github                       (after install.sh)
 set -euo pipefail
 
+# gh stores credentials per user and opens the user's browser — sudo breaks both
+if [ "$EUID" -eq 0 ]; then
+  echo "ERROR: run without sudo, as your normal user." >&2
+  exit 1
+fi
+
 if ! command -v gh >/dev/null 2>&1; then
   echo "ERROR: gh (GitHub CLI) not found. Install it via the power-user profile (sys-install) or: brew install gh" >&2
   exit 1
