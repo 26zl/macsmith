@@ -243,6 +243,18 @@ _is_system_ruby() {
 
 # RUBY GEM COMPATIBILITY
 
+# Bounded probe with closed stdin: some gem binaries (typeprof) never return on an
+# unknown flag, and an unbounded probe hangs the whole update run.
+_probe_gem_executable() {
+  local exe="$1" flag
+  for flag in --version -v --help; do
+    if _timeout 10 "$exe" "$flag" </dev/null >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 _fix_all_ruby_gems() {
   echo "${GREEN}[Ruby]${NC} Auto-fixing Ruby gems for compatibility..."
   
@@ -293,11 +305,11 @@ _fix_all_ruby_gems() {
       # Check if executable is in PATH
       if command -v "$gem_executable" >/dev/null 2>&1; then
         # Test if the executable actually works
-        if ! "$gem_executable" --version >/dev/null 2>&1 && ! "$gem_executable" -v >/dev/null 2>&1 && ! "$gem_executable" --help >/dev/null 2>&1; then
+        if _probe_gem_executable "$gem_executable"; then
+          ((working_gems++))
+        else
           is_problematic=true
           echo "  DETECTED: $gem executable is broken"
-        else
-          ((working_gems++))
         fi
       else
         # Executable not in PATH - might be problematic
