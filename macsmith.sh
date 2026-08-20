@@ -941,6 +941,23 @@ _cargo_update_packages() {
 
 # UPDATE
 
+# Homebrew's cask and the official installer fight over /Applications/Ollama.app,
+# and the installer re-downloads unconditionally; echo why we can skip it.
+_ollama_skip_reason() {
+  if command -v brew >/dev/null 2>&1 && { brew list --formula ollama >/dev/null 2>&1 || brew list --cask ollama-app >/dev/null 2>&1; }; then
+    echo "managed by Homebrew (updated by the brew step)"
+    return 0
+  fi
+  local current="" latest=""
+  current="$(_probe ollama --version 2>/dev/null | sed -n 's/.*version is \([^ ]*\).*/\1/p' | head -n1)"
+  [[ -n "$current" ]] || return 1
+  latest="$(_curl_safe -s --connect-timeout 15 --max-time 30 "https://api.github.com/repos/ollama/ollama/releases/latest" 2>/dev/null \
+    | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)"
+  [[ -n "$latest" ]] || return 1
+  [[ "$current" == "$latest" ]] || return 1
+  echo "already up to date ($current)"
+}
+
 _update_impl() {
   # Route named targets to minimal updates and `all` to the full update path.
   local _target="${1:-all}"
@@ -1086,6 +1103,10 @@ _update_impl() {
     ollama)
       if ! command -v ollama >/dev/null 2>&1; then
         echo "${RED}[Ollama]${NC} not installed"; return 1
+      fi
+      local _ollama_skip=""
+      if _ollama_skip="$(_ollama_skip_reason)"; then
+        echo "${GREEN}[Ollama]${NC} $_ollama_skip"; return 0
       fi
       echo "${GREEN}[Ollama]${NC} update via official installer"
       # curl carries --fail; capture its status directly so a failed download
@@ -2745,12 +2766,17 @@ except Exception:
     claude update || _update_failed=1
   fi
   if command -v ollama >/dev/null 2>&1; then
-    echo "${GREEN}[Ollama]${NC} update via official installer"
-    local _ollama_installer=""
-    if _ollama_installer="$(_curl_safe -fsSL https://ollama.com/install.sh)" && [[ -n "$_ollama_installer" ]]; then
-      printf '%s\n' "$_ollama_installer" | sh || _update_failed=1
+    local _ollama_skip=""
+    if _ollama_skip="$(_ollama_skip_reason)"; then
+      echo "${GREEN}[Ollama]${NC} $_ollama_skip"
     else
-      echo "${RED}[Ollama]${NC} installer download failed"; _update_failed=1
+      echo "${GREEN}[Ollama]${NC} update via official installer"
+      local _ollama_installer=""
+      if _ollama_installer="$(_curl_safe -fsSL https://ollama.com/install.sh)" && [[ -n "$_ollama_installer" ]]; then
+        printf '%s\n' "$_ollama_installer" | sh || _update_failed=1
+      else
+        echo "${RED}[Ollama]${NC} installer download failed"; _update_failed=1
+      fi
     fi
   fi
   if command -v opencode >/dev/null 2>&1; then
