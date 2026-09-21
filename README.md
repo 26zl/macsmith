@@ -215,7 +215,12 @@ Reload VS Code after changing the settings, or use `"gpuAcceleration": "off"` if
 ## Requirements
 
 macOS 13 Ventura or later, on Apple Silicon or Intel. CI runs full tests on
-macOS 14/Apple Silicon and macOS 15/Intel, with macOS 13 covered by the manual
+macOS 15 and macOS 26 (Apple Silicon).
+
+Since September 2026, Homebrew treats Intel Macs and macOS 13–14 as
+[Tier 3](https://docs.brew.sh/Support-Tiers): no upstream CI and no new
+bottles. On those setups some formulae (e.g. `fzf`) may have to build from
+source or fail to install, so they are best-effort and covered by the manual
 disposable-VM checklist.
 
 ## Uninstalling
