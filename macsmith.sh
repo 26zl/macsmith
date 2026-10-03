@@ -446,60 +446,78 @@ _nix_profile_count() {
   fi
 }
 
+# Inspect the pyenv interpreter being replaced, not whatever python3 is first on PATH.
 _check_python_upgrade_compatibility() {
+  local current_version="${1:-}" target_version="${2:-}"
 
   echo "${GREEN}[Python]${NC} Checking package compatibility before upgrade..."
   local incompatible_packages=()
-  
-  # Check explicit Requires-Python upper bounds and exclusions in one metadata pass.
-  if command -v python3 >/dev/null 2>&1; then
-    echo "  Checking pip packages..."
+
+  local current_bin=""
+  if [[ -n "$current_version" && "$current_version" != "system" ]]; then
+    current_bin="${PYENV_ROOT:-$HOME/.pyenv}/versions/$current_version/bin/python3"
+    [[ -x "$current_bin" ]] || current_bin=""
+  fi
+
+  if [[ -n "$current_bin" && -n "$target_version" ]]; then
+    echo "  Checking pip packages in Python $current_version..."
     local _py_incompat=""
-    _py_incompat="$(python3 - <<'PY' 2>/dev/null || true
+    # Evaluate Requires-Python as a specifier set: ">=3.9, !=3.9.0" is not an upper bound.
+    _py_incompat="$("$current_bin" - "$target_version" <<'PY' 2>/dev/null || true
+import sys
 try:
     from importlib.metadata import distributions
+    try:
+        from packaging.specifiers import SpecifierSet
+        from packaging.version import Version
+    except ImportError:
+        from pip._vendor.packaging.specifiers import SpecifierSet
+        from pip._vendor.packaging.version import Version
+    target = Version(sys.argv[1])
 except Exception:
     raise SystemExit(0)
 for dist in distributions():
-    rp = (dist.metadata.get("Requires-Python") or "")
-    if "<" in rp or "!=" in rp:
-        name = dist.metadata.get("Name") or ""
-        if name:
-            print(name + "\t" + rp)
+    name = dist.metadata.get("Name") or ""
+    req = dist.metadata.get("Requires-Python") or ""
+    if not name or not req:
+        continue
+    try:
+        if not SpecifierSet(req).contains(target, prereleases=True):
+            print(name + "\t" + req)
+    except Exception:
+        pass
 PY
 )"
     if [[ -n "$_py_incompat" ]]; then
       while IFS=$'\t' read -r _pkg _req; do
         [[ -z "$_pkg" ]] && continue
-        echo "  ${RED}WARNING:${NC} $_pkg has an upper-bound Python requirement: $_req"
+        echo "  ${RED}WARNING:${NC} $_pkg does not support Python $target_version (Requires-Python: $_req)"
         incompatible_packages+=("$_pkg")
       done <<< "$_py_incompat"
     fi
+  else
+    echo "  ${BLUE}INFO:${NC} No pyenv-managed pip packages to check"
   fi
-  
-  # Check pipx packages (isolated in their own venvs, generally safe)
+
+  # pipx venvs keep their own interpreter, so a new pyenv version cannot break them.
   if command -v pipx >/dev/null 2>&1; then
     local pipx_packages="$(pipx list --short 2>/dev/null | grep -v '^$' || true)"
     if [[ -n "$pipx_packages" ]]; then
       local pipx_count=$(echo "$pipx_packages" | wc -l | tr -d ' ')
       echo "  Checking pipx packages... ($pipx_count packages found)"
-      # pipx packages are isolated, safe to upgrade Python
       echo "  ${BLUE}INFO:${NC} pipx packages are isolated and should be safe to upgrade Python"
     fi
   fi
-  
-  # Report results
+
   if [[ ${#incompatible_packages[@]} -gt 0 ]]; then
     echo "  ERROR: Incompatible packages found:"
     for package in "${incompatible_packages[@]}"; do
       echo "    - pip: $package"
     done
-    echo "  ${RED}WARNING:${NC} Python upgrade skipped to avoid breaking packages"
     return 1
-  else
-    echo "  SUCCESS: All packages are compatible with new Python version"
-    return 0
   fi
+  echo "  SUCCESS: All packages are compatible with new Python version"
+  return 0
 }
 
 # GO HELPERS
@@ -792,6 +810,7 @@ _go_update_toolchain() {
     local tools_updated=0
     local tools_failed=0
     local tools_skipped=0
+    local tools_current=0
     
     # Find all binaries in Go bin directories
     for bin_dir in "${go_bin_dirs[@]}"; do
@@ -808,13 +827,11 @@ _go_update_toolchain() {
           
           # Don't name this `module_path`: zsh ties it to $MODULE_PATH (array), so
           # reusing it as a scalar next iteration errors "inconsistent type".
-          local mod_path=""
-          local module_info=$(go version -m "$binary" 2>/dev/null | grep -E "^[[:space:]]*mod[[:space:]]+" | head -1 || echo "")
-
-          if [[ -n "$module_info" ]]; then
-            # Extract module path (format: "mod    path/to/module    version")
-            mod_path=$(echo "$module_info" | awk '{print $2}')
-          fi
+          local mod_path="" mod_version="" pkg_path="" version_info=""
+          version_info="$(go version -m "$binary" 2>/dev/null || true)"
+          mod_path="$(printf '%s\n' "$version_info" | awk '$1 == "mod" {print $2; exit}')"
+          mod_version="$(printf '%s\n' "$version_info" | awk '$1 == "mod" {print $3; exit}')"
+          pkg_path="$(printf '%s\n' "$version_info" | awk '$1 == "path" {print $2; exit}')"
 
           # If we couldn't get module path, skip this tool
           if [[ -z "$mod_path" ]]; then
@@ -831,27 +848,30 @@ _go_update_toolchain() {
           ((tools_found++))
           echo "    Checking $tool_name ($mod_path)..."
 
-          # Try to update the tool by trying different common paths
-          local updated=false
-
-          # Try 1: Direct module path (if it's already a command path)
-          if _timeout 300 go install "${mod_path}@latest" 2>/dev/null; then
-            updated=true
-          else
-            # Try 2: Module path + /cmd/toolname
-            if _timeout 300 go install "${mod_path}/cmd/${tool_name}@latest" 2>/dev/null; then
+          # The recorded main-package path is exact; the module-based guesses are fallbacks.
+          local updated=false candidate=""
+          local -aU install_candidates
+          install_candidates=()
+          [[ -n "$pkg_path" ]] && install_candidates+=("$pkg_path")
+          install_candidates+=("$mod_path" "${mod_path}/cmd/${tool_name}" "${mod_path}/${tool_name}")
+          for candidate in "${install_candidates[@]}"; do
+            if _timeout 300 go install "${candidate}@latest" 2>/dev/null; then
               updated=true
-            else
-              # Try 3: Module path + /toolname
-              if _timeout 300 go install "${mod_path}/${tool_name}@latest" 2>/dev/null; then
-                updated=true
-              fi
+              break
             fi
-          fi
-          
+          done
+
           if [[ "$updated" == true ]]; then
-            ((tools_updated++))
-            echo "      SUCCESS: Updated $tool_name"
+            # go install exits 0 for an unchanged binary, so compare the recorded module version.
+            local new_version=""
+            new_version="$(go version -m "$binary" 2>/dev/null | awk '$1 == "mod" {print $3; exit}')"
+            if [[ -n "$mod_version" && "$new_version" == "$mod_version" ]]; then
+              ((tools_current++))
+              echo "      ${BLUE}INFO:${NC} $tool_name is already current ($mod_version)"
+            else
+              ((tools_updated++))
+              echo "      SUCCESS: Updated $tool_name (${mod_version:-?} -> ${new_version:-?})"
+            fi
           else
             ((tools_failed++))
             echo "      ${RED}WARNING:${NC} Could not determine install path for $tool_name"
@@ -863,7 +883,7 @@ _go_update_toolchain() {
     if [[ $tools_found -eq 0 ]]; then
       echo "    ${BLUE}INFO:${NC} No Go tools found in Go binary directories"
     else
-      echo "    Found $tools_found Go tools, updated $tools_updated, failed $tools_failed, skipped $tools_skipped"
+      echo "    Found $tools_found Go tools, updated $tools_updated, already current $tools_current, failed $tools_failed, skipped $tools_skipped"
     fi
   fi
   
@@ -906,7 +926,7 @@ _cargo_update_packages() {
     return 0
   fi
   
-  local total=$(echo "$installed_packages" | wc -l)
+  local total=$(echo "$installed_packages" | wc -l | tr -d ' ')
   local updated=0
   local skipped=0
   local failed=0
@@ -941,6 +961,11 @@ _cargo_update_packages() {
 
 # UPDATE
 
+# `ollama --version` prefixes warnings when no server is running; keep only the version.
+_ollama_version() {
+  _probe ollama --version 2>/dev/null | sed -n 's/.*version is \([^ ]*\).*/\1/p' | tail -n1
+}
+
 # Homebrew's cask and the official installer fight over /Applications/Ollama.app,
 # and the installer re-downloads unconditionally; echo why we can skip it.
 _ollama_skip_reason() {
@@ -949,13 +974,25 @@ _ollama_skip_reason() {
     return 0
   fi
   local current="" latest=""
-  current="$(_probe ollama --version 2>/dev/null | sed -n 's/.*version is \([^ ]*\).*/\1/p' | head -n1)"
+  current="$(_ollama_version)"
   [[ -n "$current" ]] || return 1
   latest="$(_curl_safe -s --connect-timeout 15 --max-time 30 "https://api.github.com/repos/ollama/ollama/releases/latest" 2>/dev/null \
     | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)"
   [[ -n "$latest" ]] || return 1
   [[ "$current" == "$latest" ]] || return 1
   echo "already up to date ($current)"
+}
+
+# Keep swiftly's stdout live but surface its stderr only when the install fails.
+_swiftly_install() {
+  local err="" rc=0
+  err="$(mktemp "${TMPDIR:-/tmp}/macsmith-swiftly.XXXXXX" 2>/dev/null)" || err=""
+  swiftly install "$@" 2>"${err:-/dev/null}" || rc=$?
+  if [[ $rc -ne 0 && -n "$err" && -s "$err" ]]; then
+    grep -iE 'error|fail|does not exist' "$err" | tail -n 3 | sed 's/^/    /'
+  fi
+  [[ -n "$err" ]] && rm -f "$err"
+  return $rc
 }
 
 _update_impl() {
@@ -1237,9 +1274,9 @@ EOF
       # Always show what Homebrew reported so users can see tap changes
       echo "$brew_update_output" | sed 's/^/    /'
       
-      # Show what is queued for upgrade (formulae and casks)
+      # Show what is queued for upgrade; --formula keeps casks out of the formula list.
       local brew_outdated_formula brew_outdated_cask
-      brew_outdated_formula="$(brew outdated --verbose 2>/dev/null || true)"
+      brew_outdated_formula="$(brew outdated --formula --verbose 2>/dev/null || true)"
       brew_outdated_cask="$(brew outdated --cask --greedy --verbose 2>/dev/null || true)"
       local brew_outdated_formula_count=0
       local brew_outdated_cask_count=0
@@ -1277,7 +1314,7 @@ EOF
       echo "  Installing $brew_outdated_total package update(s), this may take a while..."
     fi
 
-    brew_upgrade_formula_output="$(brew upgrade 2>&1)" || brew_upgrade_formula_exit_code=$?
+    brew_upgrade_formula_output="$(brew upgrade --formula 2>&1)" || brew_upgrade_formula_exit_code=$?
 
     if [[ $brew_upgrade_formula_exit_code -eq 0 ]]; then
       # Check if output indicates packages were actually upgraded
@@ -1487,8 +1524,8 @@ EOF
       # Check compatibility before upgrade
       if ! _check_python_upgrade_compatibility "$current_python" "$latest_available"; then
         echo ""
-        echo "WARNING: Some packages may be broken by Python upgrade!"
-        echo "   This may affect global pip packages and pipx packages."
+        echo "WARNING: Some global pip packages do not support Python $latest_available!"
+        echo "   They stay behind in pyenv $current_python; pip will refuse those releases on the new interpreter."
         echo ""
         # Skip prompt in non-interactive mode
         local should_upgrade=false
@@ -2211,6 +2248,7 @@ except Exception:
       fi
     else
       echo "  ${RED}WARNING:${NC} swiftly self-update failed (may require manual intervention)"
+      printf '%s\n' "$swiftly_output" | grep -iE 'error|fail|does not exist' | tail -n 3 | sed 's/^/    /'
       _update_failed=1
     fi
     
@@ -2254,7 +2292,7 @@ except Exception:
       if [[ -n "$swift_target_version" ]]; then
         echo "  Latest available: Swift $swift_target_version"
         # Use --assume-yes to avoid prompts
-        if swiftly install "$swift_target_version" --assume-yes 2>/dev/null; then
+        if _swiftly_install "$swift_target_version" --assume-yes; then
           # Explicitly switch active toolchain (--use on install may not switch when already installed).
           # Run from $HOME so swiftly doesn't rewrite a project-local/ancestor .swift-version.
           if ! (cd "$HOME" && swiftly use "$swift_target_version") 2>/dev/null; then
@@ -2307,7 +2345,7 @@ except Exception:
         local latest_stable="$(swiftly list-available 2>/dev/null | grep -E '^Swift [0-9]+\.[0-9]+\.[0-9]+' | head -n1 | awk '{print $2}' || echo "")"
         if [[ -n "$latest_stable" && "$latest_stable" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
           echo "  Installing latest stable: Swift $latest_stable"
-          if swiftly install "$latest_stable" --assume-yes --use 2>/dev/null; then
+          if _swiftly_install "$latest_stable" --assume-yes --use; then
             echo "  SUCCESS: Installed Swift $latest_stable"
             hash -r 2>/dev/null || true
           else
@@ -3298,7 +3336,11 @@ verify() {
   # Probe AI tools.
   for _tool in claude ollama opencode llm; do
     if command -v "$_tool" >/dev/null 2>&1; then
-      _ver="$(_probe "$_tool" --version 2>/dev/null | head -n1)"
+      if [[ "$_tool" == ollama ]]; then
+        _ver="$(_ollama_version)"
+      else
+        _ver="$(_probe "$_tool" --version 2>/dev/null | head -n1)"
+      fi
       if [[ -n "$_ver" ]]; then ok "$_tool" "$_ver"; else warn "$_tool" "version probe failed/timed out"; fi
     fi
   done
@@ -3734,7 +3776,7 @@ versions() {
     if command -v "$_tool" >/dev/null 2>&1; then
       case "$_tool" in
         claude) _ver="$(_probe claude --version 2>/dev/null | head -n1)" ;;
-        ollama) _ver="$(_probe ollama --version 2>/dev/null | head -n1)" ;;
+        ollama) _ver="$(_ollama_version)" ;;
         opencode) _ver="$(_probe opencode --version 2>/dev/null | head -n1)" ;;
         llm) _ver="$(_probe llm --version 2>/dev/null | head -n1)" ;;
       esac
