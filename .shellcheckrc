@@ -1,0 +1,8 @@
+# Mirrors SHELLCHECK_OPTS in .github/workflows/checks.yml; keep both lists identical.
+shell=bash
+# Sourced files are not followed.
+disable=SC1090,SC1091
+# zsh-dialect noise when linted as bash (shebang, [[ ]], local, arrays, process substitution).
+disable=SC2148,SC3010,SC3030,SC3043,SC3054,SC3024,SC3014,SC3006,SC3018,SC3011,SC3001,SC3046,SC3060
+# Reviewed case by case; see "Intentional suppressions" in CLAUDE.md.
+disable=SC2139,SC2155,SC2207,SC2034,SC2012,SC2162
