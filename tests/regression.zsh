@@ -184,9 +184,19 @@ ln -s "$hygiene_root/brew/opt/python@3.14" "$hygiene_root/pyenv/versions/active-
 ln -s /usr/bin/python3 "$hygiene_root/venvs/good/bin/python"
 ln -s "$hygiene_root/gone/python3" "$hygiene_root/venvs/broken/bin/python"
 printf 'home = %s\n' "$hygiene_root/gone" >"$hygiene_root/venvs/broken/pyvenv.cfg"
-printf '#!/bin/sh\ncase "$1" in version-name) echo active-link ;; esac\nexit 0\n' >"$hygiene_root/bin/pyenv"
-printf '#!/bin/sh\ncase "$1" in\n  environment) echo "%s" ;;\n  reinstall) echo "$2" >>"%s" ;;\nesac\nexit 0\n' \
-  "$hygiene_root/venvs" "$hygiene_root/reinstalled" >"$hygiene_root/bin/pipx"
+cat >"$hygiene_root/bin/pyenv" <<'FAKE'
+#!/bin/sh
+case "$1" in version-name) echo active-link ;; esac
+exit 0
+FAKE
+cat >"$hygiene_root/bin/pipx" <<'FAKE'
+#!/bin/sh
+case "$1" in
+  environment) echo "$HYGIENE_VENVS" ;;
+  reinstall) echo "$2" >>"$HYGIENE_LOG" ;;
+esac
+exit 0
+FAKE
 chmod 700 "$hygiene_root/bin/pyenv" "$hygiene_root/bin/pipx"
 hygiene_fns="$(
   extract_function "$repo_root/macsmith.sh" _pyenv_remove_homebrew_links
@@ -194,9 +204,11 @@ hygiene_fns="$(
 )"
 (
   GREEN='' RED='' YELLOW='' BLUE='' NC=''
+  # shellcheck disable=SC2329  # called by the extracted helpers after eval
   _detect_brew_prefix() { print -r -- "$hygiene_root/brew"; }
   eval "$hygiene_fns"
   export PATH="$hygiene_root/bin:/usr/bin:/bin" PYENV_ROOT="$hygiene_root/pyenv" HOME="$hygiene_root"
+  export HYGIENE_VENVS="$hygiene_root/venvs" HYGIENE_LOG="$hygiene_root/reinstalled"
   _pyenv_remove_homebrew_links >/dev/null
   _pipx_repair_broken_venvs >/dev/null
 )
