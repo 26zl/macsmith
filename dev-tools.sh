@@ -176,7 +176,7 @@ _env_true() {
   return 1
 }
 
-_download_verified_script() {
+_download_verified_binary() {
   local url="$1" expected_sha="$2" destination="$3"
   local actual_sha=""
   if ! /usr/bin/curl --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 2 \
@@ -185,16 +185,21 @@ _download_verified_script() {
   fi
   actual_sha="$(/usr/bin/shasum -a 256 "$destination" 2>/dev/null | /usr/bin/awk '{print $1}')"
   if [[ ! "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || [[ "$actual_sha" != "$expected_sha" ]]; then
-    echo "${RED}❌ SHA-256 mismatch for installer from $url${NC}" >&2
+    echo "${RED}❌ SHA-256 mismatch for download from $url${NC}" >&2
     echo "  expected: $expected_sha" >&2
     echo "  actual:   ${actual_sha:-unavailable}" >&2
     return 1
   fi
+  /bin/chmod 700 "$destination" || return 1
+}
+
+_download_verified_script() {
+  _download_verified_binary "$@" || return 1
+  local destination="$3"
   if ! /usr/bin/head -n1 "$destination" | /usr/bin/grep -q '^#!'; then
     echo "${RED}❌ Downloaded installer has no shebang; refusing to execute it${NC}" >&2
     return 1
   fi
-  /bin/chmod 700 "$destination" || return 1
 }
 
 # Ask user for confirmation with input validation
@@ -850,15 +855,33 @@ install_rustup() {
   
   if _ask_user "${YELLOW}📦 rustup not found. Install rustup (Rust toolchain manager)?" "Y"; then
     echo "  Installing rustup..."
-    local rustup_installer_sha256="6c30b75a75b28a96fd913a037c8581b580080b6ee9b8169a3c0feb1af7fe8caf"
+    # Pin the bootstrap to an archived, checksummed rustup-init binary;
+    # https://sh.rustup.rs is a moving URL whose hash cannot be pinned.
+    local rustup_version="1.29.1"
+    local rustup_arch="" rustup_installer_sha256=""
+    case "$(uname -m)" in
+      arm64 | aarch64)
+        rustup_arch="aarch64-apple-darwin"
+        rustup_installer_sha256="ec1b9233e7f72990ecd8e62063fa7f6c3dfc2bec8e97f88bff165f9100ac696a"
+        ;;
+      x86_64)
+        rustup_arch="x86_64-apple-darwin"
+        rustup_installer_sha256="259e2b84274434085163fe8d556510571772cda2aa6d87ca6aa664f57bc644e3"
+        ;;
+      *)
+        fail "rustup installation failed (unsupported architecture: $(uname -m))"
+        return 1
+        ;;
+    esac
+    local rustup_url="https://static.rust-lang.org/rustup/archive/${rustup_version}/${rustup_arch}/rustup-init"
     local rustup_installer=""
     rustup_installer="$(mktemp "${TMPDIR:-/tmp}/macsmith-rustup.XXXXXX")" || {
       fail "rustup installation failed (could not create temporary file)"
       return 1
     }
     DT_TMP_FILES+=("$rustup_installer")
-    if _download_verified_script "https://sh.rustup.rs" "$rustup_installer_sha256" "$rustup_installer" \
-      && /bin/bash "$rustup_installer" -y --no-modify-path; then
+    if _download_verified_binary "$rustup_url" "$rustup_installer_sha256" "$rustup_installer" \
+      && "$rustup_installer" -y --no-modify-path; then
       echo "${GREEN}✅ rustup installed${NC}"
       # Source cargo env if available
       if [[ -f "$HOME/.cargo/env" ]]; then

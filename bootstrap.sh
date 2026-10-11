@@ -121,8 +121,9 @@ if ! _is_autoyes; then
   printf '\n\n'
 fi
 
-# Check for git (comes with Xcode CLT, but may not be installed yet)
-if ! command -v git >/dev/null 2>&1; then
+# `command -v git` matches the /usr/bin/git Command Line Tools stub even when
+# the tools are not installed, so check the active developer dir instead.
+if ! xcode-select -p >/dev/null 2>&1; then
   printf '%bGit not found. Installing Xcode Command Line Tools...%b\n' "$YELLOW" "$NC"
   printf '%bINFO:%b A dialog will appear - please click "Install" and wait for completion\n' "$BLUE" "$NC"
   xcode-select --install 2>/dev/null || true
@@ -192,7 +193,14 @@ printf '%b✅ Downloaded%b (HEAD=%s, desc=%s)\n\n' "$GREEN" "$NC" "$clone_head" 
 # Run install.sh
 cd "$CLONE_DIR"
 chmod +x install.sh
-./install.sh
+# Via `curl ... | zsh` stdin is the pipe, so the Homebrew installer goes
+# non-interactive, needs sudo, and aborts with no TTY to prompt. Give
+# install.sh the real terminal when stdin is not already one.
+if [[ ! -t 0 && -r /dev/tty ]]; then
+  ./install.sh </dev/tty
+else
+  ./install.sh
+fi
 
 # Offer dev-tools
 printf '\n'

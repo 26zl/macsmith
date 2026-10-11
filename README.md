@@ -62,7 +62,7 @@ Pick newer tags from [Releases](https://github.com/26zl/macsmith/releases).
 - Project files are not edited by `update`; it maintains global tools only and moves package-manager work to a private safe directory when launched inside a project.
 - Nix/APFS removal is guarded: the APFS volume delete always requires typing `yes`, even with `--yes`.
 - `doctor` and `verify` are read-only diagnostics.
-- Python stays tidy: pipx tool venvs live on Homebrew's own Python (never the pyenv interpreter `update` rotates), `update` runs `brew autoremove` so orphaned `python@3.x` dependencies don't pile up, repairs pipx venvs whose interpreter disappeared, and `doctor` flags `pip --user` packages that landed in Apple's system Python.
+- Python stays tidy: pipx tool venvs live on Homebrew's own Python (never the pyenv interpreter `update` rotates), `update` can clear orphaned `python@3.x` dependencies with `brew autoremove` (opt in via `MACSMITH_CLEAN_BREW=1`), repairs pipx venvs whose interpreter disappeared, and `doctor` flags `pip --user` packages that landed in Apple's system Python.
 
 ## Daily use
 
@@ -142,7 +142,7 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 
 **Never touched**:
 
-- Existing Homebrew formulae/casks you installed yourself (`update` only upgrades; never uninstalls).
+- Existing Homebrew formulae/casks you installed yourself — `update` only upgrades by default; `brew autoremove` and `gem cleanup` run only when you opt in via `MACSMITH_CLEAN_BREW=1` / `MACSMITH_CLEAN_GEM=1`.
 - Project-local files (`package.json`, `Gemfile`, `go.mod`, `.swift-version`, `.python-version`, `.nvmrc`, …).
 - System Ruby at `/usr/bin/ruby`, system Python, macOS defaults, login items.
 - `~/.ssh/`, `~/.gnupg/`, `~/.aws/`, and everything in `~/.config/` except `starship.toml` when it's missing.
@@ -176,6 +176,7 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 - `MACSMITH_ALLOW_CHECKSUM_ONLY_UPGRADE=1` — ⚠️ allow `upgrade` when GitHub provenance cannot be verified (off by default)
 - `MACSMITH_ALLOW_UNSIGNED_UPGRADE=1` — ⚠️ opt `upgrade` into downloading GitHub's **unverified** zipball when a tag has no checksummed release asset (off by default; normal releases ship a verified `.sha256`)
 - `MACSMITH_CLEAN_PYENV=1` / `MACSMITH_CLEAN_NVM=1` / `MACSMITH_CLEAN_CHRUBY=1` — **opt in** to pruning old language-runtime versions during `update` (off by default, so a version another project pins via `.python-version`/`.nvmrc`/`.ruby-version` is never deleted). Pair with `MACSMITH_{PYENV,NVM,CHRUBY}_KEEP="ver1,ver2"` to keep extra versions.
+- `MACSMITH_CLEAN_BREW=1` / `MACSMITH_CLEAN_GEM=1` — **opt in** to `brew autoremove` / `gem cleanup` during `update` (off by default; otherwise `update` prints what `brew autoremove` *would* remove but deletes nothing, so a dependency-only formula or old gem version a project relies on is never removed unattended).
 - `MACSMITH_UPDATE_WORKDIR=<dir>` — safe working directory for `update` package-manager calls
 - `MACSMITH_ALLOW_PROJECT_MODIFY=1` — explicit opt-in to run `update` from the current project directory
 

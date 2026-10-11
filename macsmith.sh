@@ -341,7 +341,10 @@ _fix_all_ruby_gems() {
       if _timeout 180 gem install "$gem" --force --no-user-install --no-document 2>/dev/null; then
         ((fixed_count++))
         echo "    SUCCESS: Fixed $gem"
-        gem cleanup "$gem" 2>/dev/null || true
+        # Pruning old versions of the repaired gem is opt-in (never uninstall by default).
+        if _is_enabled "${MACSMITH_CLEAN_GEM:-}"; then
+          gem cleanup "$gem" 2>/dev/null || true
+        fi
       else
         echo "    ${RED}WARNING:${NC} Failed to fix $gem (left untouched)"
         ((failed_count++))
@@ -367,9 +370,11 @@ _fix_all_ruby_gems() {
     fi
   fi
   
-  # Clear gem cache
-  echo "  CLEANUP: Clearing gem cache..."
-  gem cleanup 2>/dev/null || true
+  # Pruning old gem versions is opt-in (never uninstall by default).
+  if _is_enabled "${MACSMITH_CLEAN_GEM:-}"; then
+    echo "  CLEANUP: Clearing gem cache..."
+    gem cleanup 2>/dev/null || true
+  fi
   
   if [[ $fixed_count -gt 0 ]]; then
     echo "  SUCCESS: Fixed $fixed_count problematic gems ($working_gems working properly)"
@@ -1053,6 +1058,31 @@ _swiftly_install() {
   return $rc
 }
 
+# brew autoremove can uninstall dependency-only formulae (e.g. the python@3.x
+# a pipx venv was built on), so pruning is opt-in via MACSMITH_CLEAN_BREW;
+# otherwise show a dry-run. Returns non-zero only when an opted-in autoremove
+# actually fails.
+_brew_autoremove_guarded() {
+  local out=""
+  if _is_enabled "${MACSMITH_CLEAN_BREW:-}"; then
+    if out="$(brew autoremove 2>&1)"; then
+      if [[ -n "$out" ]]; then
+        echo "  Autoremoved orphaned dependencies:"
+        printf '%s\n' "$out" | grep -vE '^(==>|Uninstalling)' | grep -v '^[[:space:]]*$' | sed 's/^/    /'
+      fi
+      return 0
+    fi
+    echo "  ${RED}WARNING:${NC} brew autoremove failed"
+    return 1
+  fi
+  out="$(brew autoremove --dry-run 2>&1)" || true
+  if [[ -n "$out" ]]; then
+    echo "  ${BLUE}INFO:${NC} brew autoremove would remove these (skipped — set MACSMITH_CLEAN_BREW=1 to apply):"
+    printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | sed 's/^/    /'
+  fi
+  return 0
+}
+
 _update_impl() {
   # Route named targets to minimal updates and `all` to the full update path.
   local _target="${1:-all}"
@@ -1063,10 +1093,12 @@ _update_impl() {
         echo "${RED}[Homebrew]${NC} not installed"; return 1
       fi
       echo "${GREEN}[Homebrew]${NC} update/upgrade/autoremove/cleanup..."
-      brew update && brew upgrade && brew autoremove && brew cleanup
-      local _brew_rc=$?
-      (( _brew_rc == 0 )) || return $_brew_rc
-      # autoremove can drop the python@3.x an older pipx venv was built on.
+      if ! { brew update && brew upgrade; }; then
+        return 1
+      fi
+      _brew_autoremove_guarded
+      brew cleanup
+      # autoremove (opt-in) can drop the python@3.x an older pipx venv was built on.
       _pipx_repair_broken_venvs
       return $?
       ;;
@@ -1122,8 +1154,13 @@ _update_impl() {
       ;;
     ruby|chruby|rubygems|gem)
       if command -v gem >/dev/null 2>&1; then
-        echo "${GREEN}[RubyGems]${NC} update + cleanup (180s timeout)"
-        perl -e 'alarm shift; exec @ARGV' 180 gem update --silent --no-document && gem cleanup
+        if _is_enabled "${MACSMITH_CLEAN_GEM:-}"; then
+          echo "${GREEN}[RubyGems]${NC} update + cleanup (180s timeout)"
+          perl -e 'alarm shift; exec @ARGV' 180 gem update --silent --no-document && gem cleanup
+        else
+          echo "${GREEN}[RubyGems]${NC} update (180s timeout; cleanup opt-in via MACSMITH_CLEAN_GEM=1)"
+          perl -e 'alarm shift; exec @ARGV' 180 gem update --silent --no-document
+        fi
         return $?
       fi
       echo "${RED}[Ruby]${NC} gem not found"; return 1
@@ -1247,12 +1284,12 @@ Targets:
   all                 Run the full update (default; Homebrew, all language
                       runtimes, package managers). Old-version pruning is
                       opt-in — see MACSMITH_CLEAN_* below.
-  brew | homebrew     brew update + upgrade + autoremove + cleanup
+  brew | homebrew     brew update + upgrade + cleanup (autoremove if MACSMITH_CLEAN_BREW=1)
   macports            sudo port selfupdate + upgrade outdated
   node | nvm | npm    Install/use latest LTS, bump npm
   python | pyenv |    pyenv rehash, drop fabricated pyenv links, repair +
     pipx | conda      upgrade pipx venvs, conda update
-  ruby | chruby |     gem update (180s timeout) + gem cleanup
+  ruby | chruby |     gem update (180s timeout; cleanup if MACSMITH_CLEAN_GEM=1)
     rubygems | gem
   rust | rustup       rustup update
   swift | swiftly     swiftly self-update + install latest
@@ -1272,6 +1309,8 @@ Environment:
   MACSMITH_CLEAN_PYENV=1            Opt in to pruning old pyenv versions (off by default)
   MACSMITH_CLEAN_NVM=1              Opt in to pruning old Node versions (off by default)
   MACSMITH_CLEAN_CHRUBY=1           Opt in to pruning old chruby rubies (off by default)
+  MACSMITH_CLEAN_BREW=1             Opt in to brew autoremove during update (off by default)
+  MACSMITH_CLEAN_GEM=1              Opt in to gem cleanup during update (off by default)
   MACSMITH_{PYENV,NVM,CHRUBY}_KEEP  Extra versions to keep when the matching cleanup is on
 EOF
       return 0
@@ -1454,17 +1493,10 @@ EOF
       echo "  Homebrew packages upgraded successfully"
     fi
     
-    # cleanup leaves dependency-only formulae that upgrades orphaned (old python@3.x, ...); autoremove drops them.
-    local brew_autoremove_output=""
-    if brew_autoremove_output="$(brew autoremove 2>&1)"; then
-      if [[ -n "$brew_autoremove_output" ]]; then
-        echo "  Autoremoved orphaned dependencies:"
-        printf '%s\n' "$brew_autoremove_output" | grep -vE '^(==>|Uninstalling)' | grep -v '^[[:space:]]*$' | sed 's/^/    /'
-      fi
-    else
-      brew_errors+=("autoremove")
-      echo "  ${RED}WARNING:${NC} brew autoremove failed"
-    fi
+    # Upgrades orphan dependency-only formulae (old python@3.x, ...); autoremove
+    # would drop them, but it can also remove ones projects rely on, so it is
+    # opt-in (MACSMITH_CLEAN_BREW) and shows a dry-run otherwise.
+    _brew_autoremove_guarded || brew_errors+=("autoremove")
     brew cleanup 2>/dev/null || brew_errors+=("cleanup")
     brew cleanup -s 2>/dev/null || true
     
@@ -2103,22 +2135,27 @@ except Exception:
         _update_failed=1
       fi
       
-      local gem_cleanup_output=""
-      gem_cleanup_output="$(gem cleanup 2>&1 || echo "FAILED")"
-      if [[ "$gem_cleanup_output" != *"FAILED"* ]]; then
-        # Check if cleanup actually removed anything
-        # gem cleanup shows "Removing" or specific gem names when it removes something
-        # "Clean up complete" alone (without "Removing") means nothing was removed
-        if echo "$gem_cleanup_output" | grep -qiE "(Removing [a-z]|Cleaning up [a-z]|removed [0-9]+|removing [0-9]+)"; then
-          echo "  Gems cleaned successfully"
-        elif echo "$gem_cleanup_output" | grep -qiE "(nothing|already|No|Clean up complete)" && ! echo "$gem_cleanup_output" | grep -qiE "(Removing|removing)"; then
-          echo "  ${BLUE}INFO:${NC} Gems cleanup complete (nothing to clean)"
-        else
-          echo "  ${BLUE}INFO:${NC} Gems cleanup complete"
-        fi
+      # gem cleanup removes old gem versions, which a project may still pin, so
+      # it is opt-in (matches the README "never uninstalls by default" promise).
+      if ! _is_enabled "${MACSMITH_CLEAN_GEM:-}"; then
+        echo "  ${BLUE}INFO:${NC} gem cleanup is opt-in; set MACSMITH_CLEAN_GEM=1 to prune old gem versions"
       else
-        echo "  ${RED}WARNING:${NC} gem cleanup failed"
-        _update_failed=1
+        local gem_cleanup_output=""
+        gem_cleanup_output="$(gem cleanup 2>&1 || echo "FAILED")"
+        if [[ "$gem_cleanup_output" != *"FAILED"* ]]; then
+          # gem cleanup shows "Removing" or specific gem names when it removes something;
+          # "Clean up complete" alone (without "Removing") means nothing was removed.
+          if echo "$gem_cleanup_output" | grep -qiE "(Removing [a-z]|Cleaning up [a-z]|removed [0-9]+|removing [0-9]+)"; then
+            echo "  Gems cleaned successfully"
+          elif echo "$gem_cleanup_output" | grep -qiE "(nothing|already|No|Clean up complete)" && ! echo "$gem_cleanup_output" | grep -qiE "(Removing|removing)"; then
+            echo "  ${BLUE}INFO:${NC} Gems cleanup complete (nothing to clean)"
+          else
+            echo "  ${BLUE}INFO:${NC} Gems cleanup complete"
+          fi
+        else
+          echo "  ${RED}WARNING:${NC} gem cleanup failed"
+          _update_failed=1
+        fi
       fi
     fi
   fi
@@ -4611,6 +4648,8 @@ _print_main_help() {
   echo "  MACSMITH_CLEAN_PYENV=1               Opt in to pruning old pyenv versions (MACSMITH_PYENV_KEEP=...)"
   echo "  MACSMITH_CLEAN_NVM=1                 Opt in to pruning old Node versions (MACSMITH_NVM_KEEP=...)"
   echo "  MACSMITH_CLEAN_CHRUBY=1              Opt in to pruning old chruby rubies (MACSMITH_CHRUBY_KEEP=...)"
+  echo "  MACSMITH_CLEAN_BREW=1                Opt in to 'brew autoremove' during update (off by default)"
+  echo "  MACSMITH_CLEAN_GEM=1                 Opt in to 'gem cleanup' during update (off by default)"
   echo "  MACSMITH_SWIFT_SNAPSHOTS=1           Enable Swift development snapshot updates"
   echo "  MACSMITH_UPDATE_CHECK=1              Opt in to shell-startup update check (off by default)"
   echo "  MACSMITH_ALLOW_CHECKSUM_ONLY_UPGRADE=1  Allow upgrade without provenance verification"
