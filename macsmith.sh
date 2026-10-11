@@ -626,6 +626,64 @@ _pyenv_activate_latest() {
   printf "%s" "$target"
 }
 
+# Drop pyenv "versions" that are symlinks into Homebrew (fabricated by pre-2026 macsmith) or dangling.
+_pyenv_remove_homebrew_links() {
+  command -v pyenv >/dev/null 2>&1 || return 0
+  local versions_dir="${PYENV_ROOT:-$HOME/.pyenv}/versions"
+  [[ -d "$versions_dir" ]] || return 0
+  local brew_prefix="$(_detect_brew_prefix)"
+  local active=":$(pyenv version-name 2>/dev/null || true):"
+  local entry="" name="" target="" removed=0
+  setopt local_options null_glob
+  for entry in "$versions_dir"/*; do
+    [[ -L "$entry" ]] || continue
+    name="${entry##*/}"
+    target="$(readlink "$entry" 2>/dev/null || true)"
+    if [[ -e "$entry" ]]; then
+      [[ -n "$brew_prefix" && "$target" == "$brew_prefix"/* ]] || continue
+    fi
+    if [[ "$active" == *":$name:"* ]]; then
+      echo "${GREEN}[pyenv]${NC} ${RED}WARNING:${NC} active version '$name' is only a symlink ($target); pick a real build with 'pyenv global <version>'"
+      continue
+    fi
+    if rm -f "$entry" 2>/dev/null; then
+      echo "${GREEN}[pyenv]${NC} Removed '$name' -> $target (symlink, not a pyenv build)"
+      ((removed++)) || true
+    fi
+  done
+  (( removed > 0 )) && pyenv rehash >/dev/null 2>&1
+  return 0
+}
+
+# PIPX HELPERS
+
+# Rebuild pipx venvs whose interpreter is gone (typically a python@3.x that brew autoremove or an upgrade removed).
+_pipx_repair_broken_venvs() {
+  command -v pipx >/dev/null 2>&1 || return 0
+  local venvs_dir
+  venvs_dir="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)"
+  [[ -n "$venvs_dir" ]] || venvs_dir="$HOME/.local/pipx/venvs"
+  [[ -d "$venvs_dir" ]] || return 0
+  local venv_python="" venv_dir="" name="" old_home="" out="" failed=0 repaired=0
+  setopt local_options null_glob
+  for venv_python in "$venvs_dir"/*/bin/python; do
+    [[ -L "$venv_python" && ! -e "$venv_python" ]] || continue
+    venv_dir="${venv_python%/bin/python}"
+    name="${venv_dir##*/}"
+    old_home="$(sed -n 's/^home *= *//p' "$venv_dir/pyvenv.cfg" 2>/dev/null | head -n1)"
+    echo "  ${YELLOW}REPAIR:${NC} pipx '$name' lost its interpreter (${old_home:-unknown}); reinstalling..."
+    if out="$(pipx reinstall "$name" 2>&1)"; then
+      ((repaired++)) || true
+    else
+      ((failed++)) || true
+      echo "  ${RED}WARNING:${NC} pipx reinstall $name failed:"
+      printf '%s\n' "$out" | tail -n 3 | sed 's/^/      /'
+    fi
+  done
+  (( repaired > 0 )) && echo "  Repaired $repaired pipx venv(s) on $(pipx environment --value PIPX_DEFAULT_PYTHON 2>/dev/null || echo "pipx's default Python")"
+  (( failed == 0 ))
+}
+
 # CHRUBY HELPERS
 
 _chruby_latest_available() {
@@ -1004,8 +1062,12 @@ _update_impl() {
       if ! command -v brew >/dev/null 2>&1; then
         echo "${RED}[Homebrew]${NC} not installed"; return 1
       fi
-      echo "${GREEN}[Homebrew]${NC} update/upgrade/cleanup..."
-      brew update && brew upgrade && brew cleanup
+      echo "${GREEN}[Homebrew]${NC} update/upgrade/autoremove/cleanup..."
+      brew update && brew upgrade && brew autoremove && brew cleanup
+      local _brew_rc=$?
+      (( _brew_rc == 0 )) || return $_brew_rc
+      # autoremove can drop the python@3.x an older pipx venv was built on.
+      _pipx_repair_broken_venvs
       return $?
       ;;
     macports)
@@ -1040,9 +1102,11 @@ _update_impl() {
       if command -v pyenv >/dev/null 2>&1; then
         echo "${GREEN}[pyenv]${NC} rehash"
         pyenv rehash || _py_rc=$?
+        _pyenv_remove_homebrew_links
       fi
       if command -v pipx >/dev/null 2>&1; then
-        echo "${GREEN}[pipx]${NC} upgrade-all"
+        echo "${GREEN}[pipx]${NC} repair + upgrade-all"
+        _pipx_repair_broken_venvs || _py_rc=$?
         pipx upgrade-all || _py_rc=$?
       fi
       if command -v conda >/dev/null 2>&1; then
@@ -1183,11 +1247,11 @@ Targets:
   all                 Run the full update (default; Homebrew, all language
                       runtimes, package managers). Old-version pruning is
                       opt-in — see MACSMITH_CLEAN_* below.
-  brew | homebrew     brew update + upgrade + cleanup
+  brew | homebrew     brew update + upgrade + autoremove + cleanup
   macports            sudo port selfupdate + upgrade outdated
   node | nvm | npm    Install/use latest LTS, bump npm
-  python | pyenv |    pyenv rehash, pipx upgrade-all, conda update
-    pipx | conda
+  python | pyenv |    pyenv rehash, drop fabricated pyenv links, repair +
+    pipx | conda      upgrade pipx venvs, conda update
   ruby | chruby |     gem update (180s timeout) + gem cleanup
     rubygems | gem
   rust | rustup       rustup update
@@ -1390,6 +1454,17 @@ EOF
       echo "  Homebrew packages upgraded successfully"
     fi
     
+    # cleanup leaves dependency-only formulae that upgrades orphaned (old python@3.x, ...); autoremove drops them.
+    local brew_autoremove_output=""
+    if brew_autoremove_output="$(brew autoremove 2>&1)"; then
+      if [[ -n "$brew_autoremove_output" ]]; then
+        echo "  Autoremoved orphaned dependencies:"
+        printf '%s\n' "$brew_autoremove_output" | grep -vE '^(==>|Uninstalling)' | grep -v '^[[:space:]]*$' | sed 's/^/    /'
+      fi
+    else
+      brew_errors+=("autoremove")
+      echo "  ${RED}WARNING:${NC} brew autoremove failed"
+    fi
     brew cleanup 2>/dev/null || brew_errors+=("cleanup")
     brew cleanup -s 2>/dev/null || true
     
@@ -1658,62 +1733,9 @@ EOF
     if command -v pipx >/dev/null 2>&1; then
       echo "${GREEN}[pipx]${NC} Upgrading all packages..."
       
-      # Set the default Python for pipx if needed
-      # For symlinked pyenv versions, we need to use the actual Python binary, not the symlink
-      if [[ -n "$pybin" ]]; then
-        local actual_python="$pybin"
-        
-        # If pybin is a symlink (pyenv shim), resolve it to the actual binary
-        if [[ -L "$pybin" ]] || [[ "$pybin" == *"/.pyenv/shims/"* ]]; then
-          # Get the actual Python path by following symlinks
-          actual_python=$(cd -P "$(dirname "$pybin")" 2>/dev/null && pwd)/$(basename "$pybin")
-          # If that didn't work, try using python3 directly
-          if [[ ! -f "$actual_python" ]]; then
-            actual_python=$(command -v python3 2>/dev/null || echo "$pybin")
-          fi
-        fi
-        
-        # For Homebrew Python symlinks, find the actual binary
-        if [[ -L "$actual_python" ]]; then
-          local resolved_python=$(cd -P "$(dirname "$actual_python")" 2>/dev/null && pwd)/$(basename "$actual_python")
-          if [[ -f "$resolved_python" ]]; then
-            actual_python="$resolved_python"
-          fi
-        fi
-        
-        # Ensure we have a valid Python binary (try python3.x versions dynamically, python3, or python)
-        if [[ ! -f "$actual_python" ]]; then
-          local python_dir=$(dirname "$actual_python")
-          local found_python=""
-          # First try python3 (most common)
-          if [[ -f "$python_dir/python3" ]]; then
-            found_python="$python_dir/python3"
-          # Then try to find highest python3.x version dynamically
-          else
-            # Use globbing 
-            local python_versions=()
-            for f in "$python_dir"/python3.[0-9]*; do
-              [[ -f "$f" && "$f" =~ python3\.[0-9]+$ ]] && python_versions+=("$f")
-            done
-            if [[ ${#python_versions[@]} -gt 0 ]]; then
-              # Sort versions and get the highest
-              IFS=$'\n' sorted=($(sort -V <<<"${python_versions[*]}"))
-              found_python="${sorted[-1]}"
-            fi
-          fi
-          # Fallback to python if nothing else found
-          if [[ -z "$found_python" && -f "$python_dir/python" ]]; then
-            found_python="$python_dir/python"
-          fi
-          if [[ -n "$found_python" && -f "$found_python" ]]; then
-            actual_python="$found_python"
-          fi
-        fi
-        
-        export PIPX_DEFAULT_PYTHON="$actual_python"
-        echo "  Using Python: $actual_python"
-      fi
-      
+      # Never export PIPX_DEFAULT_PYTHON here: tool venvs belong on pipx's own Homebrew Python, not on the pyenv version this update rotates.
+      _pipx_repair_broken_venvs || python_errors+=("pipx_repair")
+
       # Try to upgrade all pipx packages
       local pipx_output
       pipx_output="$(pipx upgrade-all --verbose 2>&1)"
@@ -1878,9 +1900,24 @@ except Exception:
     echo "  ${BLUE}INFO:${NC} To install Python, run: 'dev-tools'"
   fi
 
+  if command -v pyenv >/dev/null 2>&1; then
+    _pyenv_remove_homebrew_links
+  fi
+
   if command -v pyenv >/dev/null 2>&1 && [[ -n "$pyenv_target" && "$pyenv_target" != "system" ]]; then
     if ! _is_enabled "${MACSMITH_CLEAN_PYENV:-}"; then
-      echo "${GREEN}[pyenv]${NC} Old-version cleanup is opt-in (protects project .python-version pins); set MACSMITH_CLEAN_PYENV=1 to prune"
+      local kept_versions="" kept_count=0 kept_ver="" kept_dir=""
+      while IFS= read -r kept_ver; do
+        [[ -z "$kept_ver" || "$kept_ver" == "$pyenv_target" ]] && continue
+        kept_dir="${PYENV_ROOT:-$HOME/.pyenv}/versions/$kept_ver"
+        [[ -d "$kept_dir" && ! -L "$kept_dir" ]] || continue
+        kept_versions+="${kept_versions:+, }$kept_ver ($(du -sh "$kept_dir" 2>/dev/null | cut -f1))"
+        ((kept_count++)) || true
+      done <<< "$(pyenv versions --bare 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$')"
+      if (( kept_count > 0 )); then
+        echo "${GREEN}[pyenv]${NC} Keeping $kept_count older version(s): $kept_versions"
+        echo "  ${BLUE}INFO:${NC} Pruning is opt-in so project .python-version pins survive; set MACSMITH_CLEAN_PYENV=1 to remove them"
+      fi
     else
       local keep_list_raw="${MACSMITH_PYENV_KEEP:-}"
       keep_list_raw="${keep_list_raw//,/ }"
@@ -4353,6 +4390,44 @@ doctor() {
       _doctor_ok "macsmith version: $ver"
     fi
   fi
+
+  # 10. Python hygiene: fabricated pyenv links, pipx venvs without an interpreter, pip --user into system Python
+  setopt local_options null_glob
+  local pyenv_versions_dir="${PYENV_ROOT:-$HOME/.pyenv}/versions"
+  if [[ -d "$pyenv_versions_dir" ]]; then
+    local brew_prefix_py="$(_detect_brew_prefix)" py_entry="" py_target=""
+    for py_entry in "$pyenv_versions_dir"/*; do
+      [[ -L "$py_entry" ]] || continue
+      py_target="$(readlink "$py_entry" 2>/dev/null || true)"
+      if [[ ! -e "$py_entry" ]]; then
+        _doctor_warn "pyenv version '${py_entry##*/}' is a dangling symlink ($py_target)"
+        echo "    Fix: update python  (removes it)"
+      elif [[ -n "$brew_prefix_py" && "$py_target" == "$brew_prefix_py"/* ]]; then
+        _doctor_warn "pyenv version '${py_entry##*/}' is a symlink into Homebrew, not a pyenv build"
+        echo "    Fix: update python  (removes the link; Homebrew's python@ stays)"
+      fi
+    done
+  fi
+  if command -v pipx >/dev/null 2>&1; then
+    local pipx_venvs="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)" pipx_py="" pipx_venv_dir=""
+    [[ -n "$pipx_venvs" ]] || pipx_venvs="$HOME/.local/pipx/venvs"
+    for pipx_py in "$pipx_venvs"/*/bin/python; do
+      [[ -L "$pipx_py" && ! -e "$pipx_py" ]] || continue
+      pipx_venv_dir="${pipx_py%/bin/python}"
+      _doctor_warn "pipx tool '${pipx_venv_dir##*/}' has no interpreter ($(sed -n 's/^home *= *//p' "$pipx_venv_dir/pyvenv.cfg" 2>/dev/null | head -n1))"
+      echo "    Fix: update python  (reinstalls it on pipx's own Python)"
+    done
+  fi
+  local user_site="" user_site_count=0 user_site_ver=""
+  for user_site in "$HOME"/Library/Python/*/lib/python/site-packages; do
+    [[ -d "$user_site" ]] || continue
+    user_site_count="$(find "$user_site" -maxdepth 1 -name '*.dist-info' ! -name 'pip-*' ! -name 'setuptools-*' ! -name 'wheel-*' 2>/dev/null | wc -l | tr -d ' ')"
+    (( user_site_count > 0 )) || continue
+    user_site_ver="${user_site#"$HOME"/Library/Python/}"
+    user_site_ver="${user_site_ver%%/*}"
+    _doctor_warn "$user_site_count pip --user package(s) in \$HOME/Library/Python/$user_site_ver (outside pyenv/pipx; usually Apple's system Python)"
+    echo "    Fix: recreate them in a venv or pipx, then delete \$HOME/Library/Python/$user_site_ver"
+  done
 
   echo ""
   if (( issues == 0 && warnings == 0 )); then

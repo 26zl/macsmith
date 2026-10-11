@@ -160,6 +160,62 @@ else
   pass "Python management does not fabricate pyenv versions or write Cellar"
 fi
 
+if grep -Eq 'PIPX_DEFAULT_PYTHON=' "$repo_root/macsmith.sh" "$repo_root/zsh.sh"; then
+  fail "pipx venvs are pinned to the pyenv interpreter that update rotates"
+else
+  pass "pipx keeps its own interpreter (no PIPX_DEFAULT_PYTHON override)"
+fi
+
+if grep -Fq 'brew autoremove' "$repo_root/macsmith.sh" \
+  && grep -Fq '_pipx_repair_broken_venvs' "$repo_root/macsmith.sh"; then
+  pass "update removes orphaned Homebrew dependencies and repairs pipx venvs"
+else
+  fail "update is missing brew autoremove or pipx venv repair"
+fi
+
+# Exercise the Python hygiene helpers against fakes so they never touch the real pyenv/pipx.
+hygiene_root="$tmp_root/hygiene"
+mkdir -p "$hygiene_root/bin" "$hygiene_root/brew/opt/python@3.14/bin" \
+  "$hygiene_root/pyenv/versions/3.15.0/bin" "$hygiene_root/venvs/good/bin" "$hygiene_root/venvs/broken/bin"
+ln -s "$hygiene_root/brew/opt/python@3.14" "$hygiene_root/pyenv/versions/3.14.6"
+ln -s "$hygiene_root/gone" "$hygiene_root/pyenv/versions/dangling"
+ln -s "$hygiene_root/pyenv/versions/3.15.0" "$hygiene_root/pyenv/versions/my-venv"
+ln -s "$hygiene_root/brew/opt/python@3.14" "$hygiene_root/pyenv/versions/active-link"
+ln -s /usr/bin/python3 "$hygiene_root/venvs/good/bin/python"
+ln -s "$hygiene_root/gone/python3" "$hygiene_root/venvs/broken/bin/python"
+printf 'home = %s\n' "$hygiene_root/gone" >"$hygiene_root/venvs/broken/pyvenv.cfg"
+printf '#!/bin/sh\ncase "$1" in version-name) echo active-link ;; esac\nexit 0\n' >"$hygiene_root/bin/pyenv"
+printf '#!/bin/sh\ncase "$1" in\n  environment) echo "%s" ;;\n  reinstall) echo "$2" >>"%s" ;;\nesac\nexit 0\n' \
+  "$hygiene_root/venvs" "$hygiene_root/reinstalled" >"$hygiene_root/bin/pipx"
+chmod 700 "$hygiene_root/bin/pyenv" "$hygiene_root/bin/pipx"
+hygiene_fns="$(
+  extract_function "$repo_root/macsmith.sh" _pyenv_remove_homebrew_links
+  extract_function "$repo_root/macsmith.sh" _pipx_repair_broken_venvs
+)"
+(
+  GREEN='' RED='' YELLOW='' BLUE='' NC=''
+  _detect_brew_prefix() { print -r -- "$hygiene_root/brew"; }
+  eval "$hygiene_fns"
+  export PATH="$hygiene_root/bin:/usr/bin:/bin" PYENV_ROOT="$hygiene_root/pyenv" HOME="$hygiene_root"
+  _pyenv_remove_homebrew_links >/dev/null
+  _pipx_repair_broken_venvs >/dev/null
+)
+if [[ ! -L "$hygiene_root/pyenv/versions/3.14.6" ]] \
+  && [[ ! -L "$hygiene_root/pyenv/versions/dangling" ]] \
+  && [[ -L "$hygiene_root/pyenv/versions/my-venv" ]] \
+  && [[ -L "$hygiene_root/pyenv/versions/active-link" ]] \
+  && [[ -d "$hygiene_root/pyenv/versions/3.15.0" ]] \
+  && [[ -d "$hygiene_root/brew/opt/python@3.14" ]]; then
+  pass "pyenv link cleanup drops Homebrew/dangling links, keeps builds, virtualenvs and the active version"
+else
+  fail "pyenv link cleanup touched the wrong entries"
+fi
+if [[ "$(cat "$hygiene_root/reinstalled" 2>/dev/null)" == "broken" ]]; then
+  pass "pipx repair reinstalls only venvs whose interpreter is missing"
+else
+  fail "pipx repair reinstalled: $(cat "$hygiene_root/reinstalled" 2>/dev/null || print none)"
+fi
+
 if grep -Fq 'gh attestation verify' "$repo_root/macsmith.sh"; then
   pass "self-upgrade verifies GitHub provenance"
 else
