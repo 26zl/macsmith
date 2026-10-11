@@ -21,8 +21,9 @@ https://github.com/26zl/macsmith.git}
 # --- toolchain installers (remote code execution — highest scrutiny) ---
 https://raw.githubusercontent.com/Homebrew/install/${brew_commit}/install.sh
 https://raw.githubusercontent.com/nvm-sh/nvm/${nvm_version}/install.sh
-https://sh.rustup.rs
-https://nixos.org/nix/install
+# Version-pinned installers (replaced the former moving sh.rustup.rs / nixos.org/nix/install URLs).
+https://static.rust-lang.org/rustup/archive/${rustup_version}/${rustup_arch}/rustup-init
+https://releases.nixos.org/nix/nix-${nix_version}/install
 
 # --- package/version downloads (data, not piped to a shell) ---
 https://distfiles.macports.org/MacPorts/
