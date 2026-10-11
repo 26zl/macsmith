@@ -54,6 +54,18 @@ jobs:
             let headSha;
             if (context.eventName === 'workflow_run') {
               const workflowRun = context.payload.workflow_run;
+              // The workflow_run trigger matches any run whose head_branch is
+              // "main", including a fork whose default branch is named "main".
+              // Such a run carries the fork's head_sha and head_repository, so
+              // publishing it would attest and release untrusted code as
+              // "latest". Only trust pushes to this repository's own main.
+              const expectedRepo = `${context.repo.owner}/${context.repo.repo}`;
+              const headRepo = workflowRun.head_repository && workflowRun.head_repository.full_name;
+              if (workflowRun.event !== 'push' || headRepo !== expectedRepo) {
+                console.log(`ERROR: Refusing workflow_run (event: ${workflowRun.event}, head repo: ${headRepo}). Expected a push on ${expectedRepo}.`);
+                core.setOutput('all-success', 'false');
+                return;
+              }
               headSha = workflowRun.head_sha;
               console.log(`Triggered by workflow_run "${workflowRun.name}" (conclusion: ${workflowRun.conclusion})`);
             } else if (context.eventName === 'release') {
@@ -124,6 +136,11 @@ jobs:
               // plain last-write keeps the OLDEST run — a stale green could
               // then mask a fresh red for the same commit and ship a bad build.
               for (const run of runs.workflow_runs) {
+                // Only trust runs triggered by a push to this repo; a fork PR
+                // or pull_request run on the same SHA must never count as green.
+                if (run.event !== 'push') {
+                  continue;
+                }
                 if (requiredWorkflows.includes(run.name)) {
                   const existing = workflowStatuses[run.name];
                   if (!existing || run.id > existing.id) {
@@ -314,6 +331,8 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ steps.version.outputs.version }}
+          # Create the tag on the exact gated SHA, not the moving main tip.
+          target_commitish: ${{ needs.check-workflows.outputs.head-sha }}
           name: Release ${{ steps.version.outputs.version }}
           generate_release_notes: true
           body: |
