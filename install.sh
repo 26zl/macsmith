@@ -861,12 +861,16 @@ install_nix() {
       return 1
     }
     
-    # Download a reviewed installer revision and verify it before execution.
-    local nix_installer_sha256="e9d447ce3d2ff62d7ff9cb6ef401de6fa8acb148839dd00f7271945d7b638b14"
+    # Pin to an archived, versioned release whose published SHA-256 is stable;
+    # https://nixos.org/nix/install is a moving "latest" whose hash drifts on
+    # every Nix release and would fail verification here.
+    local nix_version="2.35.2"
+    local nix_installer_sha256="9adda97297d9e8ab360df95c729eabff4f4f93d6db091953c3a68f29e3fb130c"
+    local nix_installer_url="https://releases.nixos.org/nix/nix-${nix_version}/install"
     local nix_installer=""
     nix_installer="$(mktemp "${TMPDIR:-/tmp}/macsmith-nix.XXXXXX")" || return 1
     TMP_FILES+=("$nix_installer")
-    if ! _download_verified_script "https://nixos.org/nix/install" "$nix_installer_sha256" "$nix_installer"; then
+    if ! _download_verified_script "$nix_installer_url" "$nix_installer_sha256" "$nix_installer"; then
       cd "$original_dir" 2>/dev/null || true
       echo "${RED}❌ Failed to download and verify the pinned Nix installer${NC}"
       return 1
