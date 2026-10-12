@@ -28,7 +28,9 @@ $line_break\
 $character"""
 
 add_newline = true
-command_timeout = 1000
+# Headroom for load spikes (e.g. right after login), when pyenv shims can take over 1 s.
+scan_timeout = 200
+command_timeout = 3000
 
 [character]
 success_symbol = "[❯](bold green)"
