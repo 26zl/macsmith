@@ -184,11 +184,6 @@ add-zsh-hook precmd _setup_gem_path
 export PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
 [[ -d "$PYENV_ROOT/bin" ]] && _add_to_path "$PYENV_ROOT/bin"
 
-# Fix corrupted pyenv shim if it exists
-if [[ -f "$PYENV_ROOT/shims/.pyenv-shim" ]]; then
-  rm -f "$PYENV_ROOT/shims/.pyenv-shim" 2>/dev/null || true
-fi
-
 if command -v pyenv >/dev/null 2>&1; then
   eval "$(pyenv init -)" 2>/dev/null
   if [[ -s "$PYENV_ROOT/plugins/pyenv-virtualenv/bin/pyenv-virtualenv" ]]; then
