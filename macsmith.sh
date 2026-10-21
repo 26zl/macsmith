@@ -6,6 +6,12 @@
 # Read the complete script before execution so self-upgrade can replace the file safely.
 {
 
+# nvm.sh declares `local VERSION` twice in one function (at the top of nvm()
+# and again in its reinstall-packages case); zsh prints "VERSION=''" on the
+# second declaration unless TYPESET_SILENT is set, and that line surfaced in
+# `update` output. Nothing here relies on a bare `typeset name` echoing a value.
+setopt typeset_silent
+
 # Colors for output (honor the NO_COLOR convention — https://no-color.org)
 if [[ -n "${NO_COLOR:-}" ]]; then
   readonly GREEN='' BLUE='' RED='' YELLOW='' NC=''
@@ -662,21 +668,38 @@ _pyenv_remove_homebrew_links() {
 
 # PIPX HELPERS
 
-# Rebuild pipx venvs whose interpreter is gone (typically a python@3.x that brew autoremove or an upgrade removed).
+# Rebuild pipx venvs that a Python upgrade broke. Two signatures:
+#   1. bin/python dangles — the python@3.x it pointed at was autoremoved or upgraded away.
+#   2. pipx_shared.pth names a lib/python3.N/site-packages that no longer exists —
+#      pip-backend venvs borrow pip from pipx's shared venv through that .pth, and
+#      once pipx rebuilds the shared venv on a newer python@3.x the recorded path is
+#      stale and every upgrade fails with "No module named pip".
+# uv-backend venvs carry no .pth and are never touched by signature 2.
 _pipx_repair_broken_venvs() {
   command -v pipx >/dev/null 2>&1 || return 0
   local venvs_dir
   venvs_dir="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)"
   [[ -n "$venvs_dir" ]] || venvs_dir="$HOME/.local/pipx/venvs"
   [[ -d "$venvs_dir" ]] || return 0
-  local venv_python="" venv_dir="" name="" old_home="" out="" failed=0 repaired=0
+  local venv_dir="" venv_python="" name="" old_home="" reason="" shared_pth="" shared_target="" out="" failed=0 repaired=0
   setopt local_options null_glob
-  for venv_python in "$venvs_dir"/*/bin/python; do
-    [[ -L "$venv_python" && ! -e "$venv_python" ]] || continue
-    venv_dir="${venv_python%/bin/python}"
+  for venv_dir in "$venvs_dir"/*; do
+    [[ -d "$venv_dir" ]] || continue
+    venv_python="$venv_dir/bin/python"
+    reason=""
+    if [[ -L "$venv_python" && ! -e "$venv_python" ]]; then
+      old_home="$(sed -n 's/^home *= *//p' "$venv_dir/pyvenv.cfg" 2>/dev/null | head -n1)"
+      reason="lost its interpreter (${old_home:-unknown})"
+    else
+      for shared_pth in "$venv_dir"/lib/python3.*/site-packages/pipx_shared.pth; do
+        shared_target="$(head -n1 "$shared_pth" 2>/dev/null)"
+        [[ -n "$shared_target" && ! -d "$shared_target" ]] && reason="has a stale shared-pip link ($shared_target)"
+        break
+      done
+    fi
+    [[ -n "$reason" ]] || continue
     name="${venv_dir##*/}"
-    old_home="$(sed -n 's/^home *= *//p' "$venv_dir/pyvenv.cfg" 2>/dev/null | head -n1)"
-    echo "  ${YELLOW}REPAIR:${NC} pipx '$name' lost its interpreter (${old_home:-unknown}); reinstalling..."
+    echo "  ${YELLOW}REPAIR:${NC} pipx '$name' $reason; reinstalling..."
     if out="$(pipx reinstall "$name" 2>&1)"; then
       ((repaired++)) || true
     else
@@ -1063,9 +1086,14 @@ _swiftly_install() {
 # otherwise show a dry-run. Returns non-zero only when an opted-in autoremove
 # actually fails.
 _brew_autoremove_guarded() {
-  local out=""
+  # Capture stdout only: third-party taps print deprecation warnings on
+  # stderr (e.g. a cask still using `postflight`), and merging the streams
+  # made an empty dry-run look like a list of removable formulae.
+  local out="" err=""
   if _is_enabled "${MACSMITH_CLEAN_BREW:-}"; then
-    if out="$(brew autoremove 2>&1)"; then
+    err="$(mktemp "${TMPDIR:-/tmp}/macsmith-autoremove.XXXXXX" 2>/dev/null)" || err=""
+    if out="$(brew autoremove 2>"${err:-/dev/null}")"; then
+      [[ -n "$err" ]] && rm -f "$err"
       if [[ -n "$out" ]]; then
         echo "  Autoremoved orphaned dependencies:"
         printf '%s\n' "$out" | grep -vE '^(==>|Uninstalling)' | grep -v '^[[:space:]]*$' | sed 's/^/    /'
@@ -1073,14 +1101,25 @@ _brew_autoremove_guarded() {
       return 0
     fi
     echo "  ${RED}WARNING:${NC} brew autoremove failed"
+    if [[ -n "$err" ]]; then
+      grep -iE 'error|fail' "$err" | tail -n 3 | sed 's/^/    /'
+      rm -f "$err"
+    fi
     return 1
   fi
-  out="$(brew autoremove --dry-run 2>&1)" || true
+  out="$(brew autoremove --dry-run 2>/dev/null)" || true
   if [[ -n "$out" ]]; then
     echo "  ${BLUE}INFO:${NC} brew autoremove would remove these (skipped — set MACSMITH_CLEAN_BREW=1 to apply):"
     printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | sed 's/^/    /'
   fi
   return 0
+}
+
+# Count the apps in `mas outdated` output. mas right-aligns the numeric app
+# IDs, so every line but the widest ID starts with spaces — anchoring on
+# "^[0-9]" under-counted ("Found 1 outdated app(s)" above a two-app list).
+_mas_count_outdated() {
+  printf '%s\n' "${1:-}" | grep -cE '^[[:space:]]*[0-9]+[[:space:]]' || true
 }
 
 _update_impl() {
@@ -1791,37 +1830,17 @@ EOF
         python_errors+=("pipx")
         echo "  ${RED}WARNING:${NC} pipx upgrade failed (exit code: $pipx_exit_code)"
         
-        # Try to identify specific issues
-        if [[ "$pipx_output" == *"No packages to upgrade"* ]]; then
-          echo "  ${BLUE}INFO:${NC} No pipx packages need upgrading"
-        elif [[ "$pipx_output" == *"error"* ]] || [[ "$pipx_output" == *"Error"* ]]; then
-          echo "  ERROR: pipx encountered errors during upgrade"
-          echo "  Consider running: pipx upgrade-all --force"
+        # Surface pipx's own diagnosis (the backend error and the failed-package
+        # summary) instead of guessing, then point at the per-package fix. A blind
+        # `pipx upgrade-all --force` retry only re-links apps in ~/.local/bin; it
+        # cannot fix a backend failure and just repeated the slow failure.
+        local pipx_failed=""
+        pipx_failed="$(printf '%s\n' "$pipx_output" | sed -n 's/^The following package(s) failed to upgrade: *//p' | tail -n1)"
+        printf '%s\n' "$pipx_output" | grep -E '^(stderr: |ERROR: |error: |Package backend exited|The following package)' | tail -n 6 | sed 's/^/    /'
+        if [[ -n "$pipx_failed" ]]; then
+          echo "  ${BLUE}INFO:${NC} Rebuild the failing venv(s) with: pipx reinstall ${pipx_failed//,/}"
         else
-          echo "  ${BLUE}INFO:${NC} pipx upgrade completed with warnings"
-        fi
-        
-        # Try force upgrade as fallback
-        echo "  ATTEMPTING: Force upgrade as fallback..."
-        local pipx_force_output
-        pipx_force_output="$(pipx upgrade-all --force 2>&1)"
-        if [[ $? -eq 0 ]]; then
-          # Check if force upgrade actually updated anything
-          if echo "$pipx_force_output" | grep -qiE "(upgraded|installed|updating|changed|new version)"; then
-            echo "  SUCCESS: pipx packages upgraded with force"
-            # Remove pipx from errors if force upgrade succeeded
-            local new_errors=()
-            for err in "${python_errors[@]}"; do
-              [[ "$err" != "pipx" ]] && new_errors+=("$err")
-            done
-            python_errors=("${new_errors[@]}")
-          elif echo "$pipx_force_output" | grep -qiE "(No packages to upgrade|already|up to date|nothing to do)"; then
-            echo "  ${BLUE}INFO:${NC} pipx packages are already up to date (force check)"
-          else
-            echo "  ${BLUE}INFO:${NC} pipx packages checked with force (may already be up to date)"
-          fi
-        else
-          echo "  ${RED}WARNING:${NC} Force upgrade also failed"
+          echo "  ${BLUE}INFO:${NC} Re-run for details: pipx upgrade-all --verbose"
         fi
       fi
     else
@@ -2669,8 +2688,7 @@ except Exception:
     else
       # Count outdated apps
       local outdated_count
-      outdated_count=$(echo "$outdated_output" | grep -cE "^[0-9]+" 2>/dev/null)
-      outdated_count=${outdated_count:-0}
+      outdated_count="$(_mas_count_outdated "$outdated_output")"
 
       if [[ "$outdated_count" -gt 0 ]]; then
         echo "  Found $outdated_count outdated app(s):"
@@ -2896,9 +2914,10 @@ except Exception:
     opencode upgrade || _update_failed=1
   fi
   if command -v llm >/dev/null 2>&1; then
+    # The brew step above already upgraded every outdated formula; a second
+    # `brew upgrade llm` only re-downloaded the API JSON and warned "already installed".
     if command -v brew >/dev/null 2>&1 && brew list llm >/dev/null 2>&1; then
-      echo "${GREEN}[llm]${NC} brew upgrade llm"
-      brew upgrade llm || _update_failed=1
+      echo "${GREEN}[llm]${NC} managed by Homebrew (updated by the brew step)"
     fi
   fi
 

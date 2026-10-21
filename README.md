@@ -62,7 +62,7 @@ Pick newer tags from [Releases](https://github.com/26zl/macsmith/releases).
 - Project files are not edited by `update`; it maintains global tools only and moves package-manager work to a private safe directory when launched inside a project.
 - Nix/APFS removal is guarded: the APFS volume delete always requires typing `yes`, even with `--yes`.
 - `doctor` and `verify` are read-only diagnostics.
-- Python stays tidy: pipx tool venvs live on Homebrew's own Python (never the pyenv interpreter `update` rotates), `update` can clear orphaned `python@3.x` dependencies with `brew autoremove` (opt in via `MACSMITH_CLEAN_BREW=1`), repairs pipx venvs whose interpreter disappeared, and `doctor` flags `pip --user` packages that landed in Apple's system Python.
+- Python stays tidy: pipx tool venvs live on Homebrew's own Python (never the pyenv interpreter `update` rotates), `update` can clear orphaned `python@3.x` dependencies with `brew autoremove` (opt in via `MACSMITH_CLEAN_BREW=1`), repairs pipx venvs whose interpreter disappeared or whose shared-pip link went stale after a Python upgrade, and `doctor` flags `pip --user` packages that landed in Apple's system Python.
 
 ## Daily use
 

@@ -176,7 +176,10 @@ fi
 # Exercise the Python hygiene helpers against fakes so they never touch the real pyenv/pipx.
 hygiene_root="$tmp_root/hygiene"
 mkdir -p "$hygiene_root/bin" "$hygiene_root/brew/opt/python@3.14/bin" \
-  "$hygiene_root/pyenv/versions/3.15.0/bin" "$hygiene_root/venvs/good/bin" "$hygiene_root/venvs/broken/bin"
+  "$hygiene_root/pyenv/versions/3.15.0/bin" "$hygiene_root/venvs/good/bin" "$hygiene_root/venvs/broken/bin" \
+  "$hygiene_root/venvs/good/lib/python3.14/site-packages" "$hygiene_root/venvs/stale/bin" \
+  "$hygiene_root/venvs/stale/lib/python3.14/site-packages" "$hygiene_root/venvs/uvonly/bin" \
+  "$hygiene_root/shared/lib/python3.14/site-packages"
 ln -s "$hygiene_root/brew/opt/python@3.14" "$hygiene_root/pyenv/versions/3.14.6"
 ln -s "$hygiene_root/gone" "$hygiene_root/pyenv/versions/dangling"
 ln -s "$hygiene_root/pyenv/versions/3.15.0" "$hygiene_root/pyenv/versions/my-venv"
@@ -184,6 +187,12 @@ ln -s "$hygiene_root/brew/opt/python@3.14" "$hygiene_root/pyenv/versions/active-
 ln -s /usr/bin/python3 "$hygiene_root/venvs/good/bin/python"
 ln -s "$hygiene_root/gone/python3" "$hygiene_root/venvs/broken/bin/python"
 printf 'home = %s\n' "$hygiene_root/gone" >"$hygiene_root/venvs/broken/pyvenv.cfg"
+# pip-backend venvs borrow pip through pipx_shared.pth: `good` points at the live
+# shared venv, `stale` at the python3.13 one pipx rebuilt away, `uvonly` has none.
+ln -s /usr/bin/python3 "$hygiene_root/venvs/stale/bin/python"
+ln -s /usr/bin/python3 "$hygiene_root/venvs/uvonly/bin/python"
+print -r -- "$hygiene_root/shared/lib/python3.14/site-packages" >"$hygiene_root/venvs/good/lib/python3.14/site-packages/pipx_shared.pth"
+print -r -- "$hygiene_root/shared/lib/python3.13/site-packages" >"$hygiene_root/venvs/stale/lib/python3.14/site-packages/pipx_shared.pth"
 cat >"$hygiene_root/bin/pyenv" <<'FAKE'
 #!/bin/sh
 case "$1" in version-name) echo active-link ;; esac
@@ -222,10 +231,65 @@ if [[ ! -L "$hygiene_root/pyenv/versions/3.14.6" ]] \
 else
   fail "pyenv link cleanup touched the wrong entries"
 fi
-if [[ "$(cat "$hygiene_root/reinstalled" 2>/dev/null)" == "broken" ]]; then
-  pass "pipx repair reinstalls only venvs whose interpreter is missing"
+if [[ "$(cat "$hygiene_root/reinstalled" 2>/dev/null)" == $'broken\nstale' ]]; then
+  pass "pipx repair reinstalls only venvs with a missing interpreter or a stale shared-pip link"
 else
-  fail "pipx repair reinstalled: $(cat "$hygiene_root/reinstalled" 2>/dev/null || print none)"
+  fail "pipx repair reinstalled: $(tr '\n' ' ' <"$hygiene_root/reinstalled" 2>/dev/null || print none)"
+fi
+
+# `mas outdated` right-aligns app IDs, so all but the widest line start with spaces.
+mas_count_fn="$(extract_function "$repo_root/macsmith.sh" _mas_count_outdated)"
+mas_sample=$'1339170533  CleanMyMac   (5.7.1  -> 5.7.2)\n 545519333  Prime Video  (10.152 -> 10.153.2)'
+if [[ -n "$mas_count_fn" ]] && (
+  eval "$mas_count_fn"
+  [[ "$(_mas_count_outdated "$mas_sample")" == 2 && "$(_mas_count_outdated "")" == 0 ]]
+); then
+  pass "mas outdated count includes right-aligned app IDs"
+else
+  fail "mas outdated count mis-counts right-aligned app IDs"
+fi
+
+# A tap cask warning on stderr must not turn an empty autoremove dry-run into a "would remove" list.
+autoremove_root="$tmp_root/autoremove"
+mkdir -p "$autoremove_root/quiet/bin" "$autoremove_root/listed/bin"
+cat >"$autoremove_root/quiet/bin/brew" <<'FAKE'
+#!/bin/sh
+echo 'Warning: Calling `postflight` is deprecated! Use `postflight_steps` instead.' >&2
+exit 0
+FAKE
+cat >"$autoremove_root/listed/bin/brew" <<'FAKE'
+#!/bin/sh
+echo 'Warning: Calling `postflight` is deprecated! Use `postflight_steps` instead.' >&2
+printf '==> Would autoremove 1 unneeded formula:\nicu4c@77\n'
+exit 0
+FAKE
+chmod 700 "$autoremove_root/quiet/bin/brew" "$autoremove_root/listed/bin/brew"
+autoremove_fns="$(
+  extract_function "$repo_root/macsmith.sh" _is_enabled
+  extract_function "$repo_root/macsmith.sh" _brew_autoremove_guarded
+)"
+# Prefix assignments scope PATH to the call (zsh restores it afterwards).
+autoremove_quiet="$(
+  GREEN='' RED='' YELLOW='' BLUE='' NC=''
+  eval "$autoremove_fns"
+  PATH="$autoremove_root/quiet/bin:/usr/bin:/bin" MACSMITH_CLEAN_BREW="" _brew_autoremove_guarded 2>&1
+)"
+autoremove_listed="$(
+  GREEN='' RED='' YELLOW='' BLUE='' NC=''
+  eval "$autoremove_fns"
+  PATH="$autoremove_root/listed/bin:/usr/bin:/bin" MACSMITH_CLEAN_BREW="" _brew_autoremove_guarded 2>&1
+)"
+if [[ -z "$autoremove_quiet" && "$autoremove_listed" == *"icu4c@77"* && "$autoremove_listed" != *postflight* ]]; then
+  pass "autoremove dry-run reports stdout only (tap warnings on stderr are not a removal list)"
+else
+  fail "autoremove dry-run output — quiet: [$autoremove_quiet] listed: [$autoremove_listed]"
+fi
+
+# nvm.sh declares `local VERSION` twice in nvm(); without TYPESET_SILENT zsh echoes VERSION='' mid-update.
+if grep -Eq '^setopt typeset_silent' "$repo_root/macsmith.sh"; then
+  pass "update silences zsh's duplicate-local echo (nvm's VERSION='' line)"
+else
+  fail "macsmith.sh lost 'setopt typeset_silent' — nvm reinstall-packages prints VERSION='' under zsh"
 fi
 
 if grep -Fq 'gh attestation verify' "$repo_root/macsmith.sh"; then
