@@ -43,6 +43,7 @@ background/* linguist-vendored
 .gitattributes  export-ignore
 .gitignore      export-ignore
 .shellcheckrc   export-ignore
+.editorconfig   export-ignore
 quick-test.sh   export-ignore
 tests/          export-ignore
 background/     export-ignore
