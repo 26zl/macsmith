@@ -2065,10 +2065,11 @@ EOF
         "/usr/local/anaconda3/bin/conda"
       )
       
-      for path in "${conda_paths[@]}"; do
-        if [[ -f "$path" ]]; then
+      local candidate=""
+      for candidate in "${conda_paths[@]}"; do
+        if [[ -f "$candidate" ]]; then
           # Use zsh parameter expansion instead of dirname command
-          miniforge_path="${path%/*}"
+          miniforge_path="${candidate%/*}"
           break
         fi
       done
@@ -3338,9 +3339,10 @@ verify() {
         "/usr/local/anaconda3/bin/conda"
       )
       local conda_found=false
-      for path in "${conda_paths[@]}"; do
-        if [[ -f "$path" ]]; then
-          local conda_version="$("$path" --version 2>/dev/null || echo "installed")"
+      local candidate=""
+      for candidate in "${conda_paths[@]}"; do
+        if [[ -f "$candidate" ]]; then
+          local conda_version="$("$candidate" --version 2>/dev/null || echo "installed")"
           warn "conda" "$conda_version (not in PATH)"
           conda_found=true
           break
@@ -3776,12 +3778,13 @@ versions() {
         "/usr/local/miniforge3/bin/conda"
         "/usr/local/anaconda3/bin/conda"
       )
-      for path in "${conda_paths[@]}"; do
-        if [[ -f "$path" ]]; then
-          local conda_version="$("$path" --version 2>/dev/null || echo "installed")"
+      local candidate=""
+      for candidate in "${conda_paths[@]}"; do
+        if [[ -f "$candidate" ]]; then
+          local conda_version="$("$candidate" --version 2>/dev/null || echo "installed")"
           local conda_count=""
-          if "$path" list 2>/dev/null | tail -n +4 >/dev/null 2>&1; then
-            conda_count="$("$path" list 2>/dev/null | tail -n +4 | wc -l | tr -d ' ' || echo "0")"
+          if "$candidate" list 2>/dev/null | tail -n +4 >/dev/null 2>&1; then
+            conda_count="$("$candidate" list 2>/dev/null | tail -n +4 | wc -l | tr -d ' ' || echo "0")"
             if [[ "$conda_count" -gt 0 ]]; then
               echo "conda .......... $conda_version ($conda_count packages, not in PATH)"
             else

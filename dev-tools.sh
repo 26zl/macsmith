@@ -652,7 +652,7 @@ install_nvm() {
 install_chruby() {
   local chruby_installed=false
   local chruby_script=""
-  local path  # zsh: `path` is tied to $PATH; declare local so the loops below don't clobber it
+  local candidate=""  # never call it `path`: zsh ties that array to $PATH, and even a local one empties PATH for the rest of the function
   
   # Check if chruby is available as a function or command
   if type chruby >/dev/null 2>&1 || command -v chruby >/dev/null 2>&1; then
@@ -684,9 +684,9 @@ install_chruby() {
         chruby_script="$chruby_prefix/share/chruby/chruby.sh"
       else
         # Fallback: try common paths
-        for path in "${possible_paths[@]}"; do
-          if [[ -f "$path" ]]; then
-            chruby_script="$path"
+        for candidate in "${possible_paths[@]}"; do
+          if [[ -f "$candidate" ]]; then
+            chruby_script="$candidate"
             break
           fi
         done
@@ -695,10 +695,10 @@ install_chruby() {
   fi
   
   # Check file locations
-  for path in "${possible_paths[@]}"; do
-    if [[ -f "$path" ]]; then
+  for candidate in "${possible_paths[@]}"; do
+    if [[ -f "$candidate" ]]; then
       chruby_installed=true
-      chruby_script="$path"
+      chruby_script="$candidate"
       break
     fi
   done
@@ -905,7 +905,7 @@ install_rustup() {
 
 install_swiftly() {
   local swiftly_installed=false
-  local path  # zsh: `path` is tied to $PATH; declare local so the loop below doesn't clobber it
+  local candidate=""  # never call it `path`: zsh ties that array to $PATH, and even a local one empties PATH for the rest of the function
 
   # Check if swiftly is available as a command
   if command -v swiftly >/dev/null 2>&1; then
@@ -932,11 +932,11 @@ install_swiftly() {
       "$HOME/bin/swiftly"
       "/usr/local/bin/swiftly"
     )
-    for path in "${possible_paths[@]}"; do
-      if [[ -f "$path" ]]; then
+    for candidate in "${possible_paths[@]}"; do
+      if [[ -f "$candidate" ]]; then
         swiftly_installed=true
         # Add directory to PATH if not already there
-        local dir_path=$(dirname "$path")
+        local dir_path=$(dirname "$candidate")
         if [[ ":$PATH:" != *":$dir_path:"* ]]; then
           export PATH="$dir_path:$PATH"
         fi

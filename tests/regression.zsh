@@ -486,6 +486,37 @@ else
   [[ -n "$manifest_errors" ]] && print -ru2 -- "$manifest_errors"
 fi
 
+# zsh ties the array `path` (and fpath, cdpath, manpath, module_path, mailpath) to its scalar
+# twin: a loop or local named `path` replaces PATH for the rest of the function, which made
+# `update` report Go, Rust, .NET, chruby and mas as "Not found" once conda was absent.
+special_var_hits="$(grep -nE '(for|local|typeset|declare)[[:space:]]+([^#]*[[:space:]])?(path|fpath|cdpath|manpath|module_path|mailpath)([=[:space:]]|$)' \
+  "$repo_root"/*.sh "$repo_root"/scripts/*.sh "$repo_root"/tests/*.zsh 2>/dev/null \
+  | grep -vE ':[0-9]+:[[:space:]]*#|special_var_hits' || true)"
+if [[ -z "$special_var_hits" ]]; then
+  pass "no zsh script names a variable after a PATH-tied array"
+else
+  fail "a variable is named after a PATH-tied zsh array"
+  print -ru2 -- "$special_var_hits"
+fi
+
+mysql_tmp="$(mktemp -d "${TMPDIR:-/tmp}/macsmith-mysql.XXXXXX")"
+mkdir -p "$mysql_tmp/mysql/bin" "$mysql_tmp/mysql/support-files"
+print -r -- '#!/bin/sh' > "$mysql_tmp/mysql/bin/mysql"
+chmod +x "$mysql_tmp/mysql/bin/mysql"
+: > "$mysql_tmp/mysql/support-files/mysql.server"
+mysql_found="$(
+  HOMEBREW_PREFIX="$mysql_tmp/no-brew"
+  PATH="$mysql_tmp/mysql/bin:/usr/bin:/bin"
+  eval "$(extract_function "$repo_root/zsh.sh" _detect_mysql_path)"
+  _detect_mysql_path
+)"
+if [[ "$mysql_found" == "$mysql_tmp/mysql" ]]; then
+  pass "_detect_mysql_path keeps PATH for its command -v fallback"
+else
+  fail "_detect_mysql_path lost PATH after its loop (got '${mysql_found}')"
+fi
+command rm -rf -- "$mysql_tmp"
+
 if [[ $failures -ne 0 ]]; then
   print -ru2 -- "$failures regression test(s) failed"
   exit 1

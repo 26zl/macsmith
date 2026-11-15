@@ -304,8 +304,8 @@ fi
 
 # MySQL aliases - detect MySQL installation dynamically
 _detect_mysql_path() {
-  # Keep the loop's `path` local because zsh ties the global variable to PATH.
-  local mysql_paths=() path=""
+  # Not `path`: zsh ties it to PATH, and even a local one replaces PATH for the rest of the function.
+  local mysql_paths=() candidate=""
   
   # Reuse the Homebrew prefix computed at startup.
   if [[ -n "${HOMEBREW_PREFIX:-}" ]]; then
@@ -320,11 +320,11 @@ _detect_mysql_path() {
     "/usr/local/mysql/support-files/mysql.server"
   )
   
-  for path in "${mysql_paths[@]}"; do
-    if [[ -f "$path" ]]; then
+  for candidate in "${mysql_paths[@]}"; do
+    if [[ -f "$candidate" ]]; then
       # Return the base directory (two levels up from mysql.server)
       # e.g., /opt/homebrew/opt/mysql/support-files/mysql.server -> /opt/homebrew/opt/mysql
-      echo "${path%/support-files/mysql.server}"
+      echo "${candidate%/support-files/mysql.server}"
       return 0
     fi
   done
@@ -364,12 +364,12 @@ _detect_openjdk_path() {
   
   # Check versioned openjdk paths (openjdk@17, openjdk@21, etc.)
   if [[ -n "$HOMEBREW_PREFIX" ]] && [[ -d "$HOMEBREW_PREFIX/opt" ]]; then
-    # Use local null_glob and a local `path` variable when scanning versioned OpenJDK directories.
+    # local null_glob for the scan; the loop variable is not `path`, which zsh ties to PATH.
     setopt local_options null_glob
-    local result="" path=""
-    for path in "$HOMEBREW_PREFIX"/opt/openjdk@*/bin; do
-      if [[ -d "$path" ]]; then
-        result="$path"
+    local result="" candidate=""
+    for candidate in "$HOMEBREW_PREFIX"/opt/openjdk@*/bin; do
+      if [[ -d "$candidate" ]]; then
+        result="$candidate"
         break
       fi
     done
