@@ -768,6 +768,189 @@ _chruby_install_latest() {
   echo "ruby-$latest"
 }
 
+# RUNTIME VERSION PRUNING
+
+# `update` installs every new pyenv/nvm/chruby/swiftly release and switches to it, so
+# the releases it replaced piled up (a Swift toolchain is ~5 GB). By default only
+# superseded versions go: older releases of a line that still has a newer install.
+# A line is X.Y for Python and Ruby and the major version for Node and Swift, the
+# range in which a newer release is a drop-in replacement. Active and default
+# versions, MACSMITH_*_KEEP entries and versions that a project pin or virtualenv
+# still uses always stay; MACSMITH_CLEAN_<TOOL>=0 turns pruning off.
+
+# Pin files and virtualenvs under $HOME (6 levels, heavy trees skipped) and in Poetry's
+# env cache, scanned once per run. Pins elsewhere need MACSMITH_*_KEEP.
+_RUNTIME_REF_FILES=""
+_RUNTIME_REF_SCANNED=false
+_runtime_ref_scan() {
+  [[ "$_RUNTIME_REF_SCANNED" == true ]] && return 0
+  _RUNTIME_REF_SCANNED=true
+  local roots=("$HOME")
+  [[ -d "$HOME/Library/Caches/pypoetry/virtualenvs" ]] && roots+=("$HOME/Library/Caches/pypoetry/virtualenvs")
+  _RUNTIME_REF_FILES="$(find -H "${roots[@]}" -maxdepth 6 \
+    \( -name node_modules -o -name .git -o -path "$HOME/Library" -o -path "$HOME/.Trash" \
+      -o -path "$HOME/.cache" -o -path "$HOME/.npm" -o -path "$HOME/.nvm" -o -path "$HOME/.pyenv" \
+      -o -path "$HOME/.rubies" -o -path "$HOME/.gem" -o -path "$HOME/.rustup" -o -path "$HOME/.cargo" \
+      -o -path "$HOME/.swiftly" \) -prune \
+    -o -type f \( -name .python-version -o -name .nvmrc -o -name .node-version \
+      -o -name .ruby-version -o -name .swift-version -o -name pyvenv.cfg \) -print 2>/dev/null)"
+  return 0
+}
+
+# Print the versions named by the scanned pin files ($@ = basenames such as .nvmrc).
+_runtime_pins() {
+  local name="" file=""
+  for name in "$@"; do
+    while IFS= read -r file; do
+      [[ -n "$file" && "${file##*/}" == "$name" ]] || continue
+      head -c 1024 "$file" 2>/dev/null | sed 's/#.*//' | tr -s '[:space:]' '\n' | grep -v '^$'
+    done <<< "$_RUNTIME_REF_FILES"
+  done
+  return 0
+}
+
+# Print the pyenv versions a virtualenv still runs on: a pyvenv.cfg home inside
+# $PYENV_ROOT/versions, or a pyenv-virtualenv env, which lives inside its base version.
+_pyenv_referenced_versions() {
+  local versions_dir="${PYENV_ROOT:-$HOME/.pyenv}/versions" file="" home="" env_dir=""
+  while IFS= read -r file; do
+    [[ "${file##*/}" == pyvenv.cfg ]] || continue
+    home="$(sed -n 's/^home *= *//p' "$file" 2>/dev/null | head -n1)"
+    [[ "$home" == "$versions_dir"/* ]] || continue
+    home="${home#"$versions_dir"/}"
+    printf '%s\n' "${home%%/*}"
+  done <<< "$_RUNTIME_REF_FILES"
+  setopt local_options null_glob
+  for env_dir in "$versions_dir"/*/envs/*; do
+    [[ -d "$env_dir" ]] || continue
+    env_dir="${env_dir#"$versions_dir"/}"
+    printf '%s\n' "${env_dir%%/*}"
+  done
+  return 0
+}
+
+# Print the installed versions ($2, X.Y.Z per line) that a newer install of the same
+# release line supersedes and that no entry of $3 protects. $1 is the number of version
+# components that form a line. A protected entry may be a prefix: "24.21" keeps the
+# newest installed 24.21.x, the version such a pin resolves to.
+_superseded_versions() {
+  {
+    printf '%s\n' "${2:-}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V -u
+    printf '%s\n' "--"
+    printf '%s\n' "${3:-}"
+  } | awk -v depth="${1:-1}" '
+    $0 == "--" { pins = 1; next }
+    !pins {
+      n++; ver[n] = $0
+      split($0, part, ".")
+      line = part[1]
+      for (i = 2; i <= depth; i++) line = line "." part[i]
+      newest[line] = $0
+      next
+    }
+    /^[0-9]+(\.[0-9]+)*$/ {
+      hit = ""
+      for (i = 1; i <= n; i++) if (ver[i] == $0 || index(ver[i], $0 ".") == 1) hit = ver[i]
+      if (hit != "") keep[hit] = 1
+    }
+    END {
+      for (line in newest) keep[newest[line]] = 1
+      for (i = 1; i <= n; i++) if (!(ver[i] in keep)) print ver[i]
+    }'
+}
+
+# Run "$@" <version> for each version _superseded_versions selects. $1 labels the
+# output, $2 names the opt-out variable, $3-$5 are _superseded_versions' arguments.
+_prune_superseded() {
+  local tag="$1" optout="$2" depth="$3" installed="$4" protected="$5" old="" ver=""
+  shift 5
+  old="$(_superseded_versions "$depth" "$installed" "$protected")"
+  [[ -n "$old" ]] || return 0
+  echo "${GREEN}[$tag]${NC} Removing superseded versions (active, newest per line and pinned ones stay; $optout=0 keeps them):"
+  while IFS= read -r ver; do
+    [[ -n "$ver" ]] || continue
+    echo "  removing $ver"
+    "$@" "$ver" </dev/null || echo "  ${RED}WARNING:${NC} Failed to remove $ver"
+  done <<< "$old"
+  return 0
+}
+
+# $2 is the version this run rotated away from: it stays until the next update, because
+# its site-packages hold pip installs that nothing migrates to the new version.
+_pyenv_prune_superseded() {
+  local target="$1" previous="${2:-}" protected=""
+  [[ -n "$target" && "$target" != system ]] || return 0
+  _runtime_ref_scan
+  protected="$(
+    printf '%s\n' "$target" "$previous" | tr ':' '\n'
+    pyenv version-name 2>/dev/null | tr ':' '\n'
+    cat "${PYENV_ROOT:-$HOME/.pyenv}/version" 2>/dev/null
+    printf '%s\n' "${MACSMITH_PYENV_KEEP:-}" | tr ', ' '\n'
+    _runtime_pins .python-version
+    _pyenv_referenced_versions
+  )"
+  _prune_superseded pyenv MACSMITH_CLEAN_PYENV 2 "$(pyenv versions --bare 2>/dev/null)" "$protected" pyenv uninstall -f
+  pyenv rehash >/dev/null 2>&1 || true
+}
+
+# Every nvm alias (default included) counts as in use; nvm resolves alias pins such as lts/*.
+_nvm_prune_superseded() {
+  local active="$1" installed="" protected="" alias_file="" pin=""
+  [[ -n "$active" && "$active" != system && "$active" != none ]] || return 0
+  _runtime_ref_scan
+  installed="$(nvm ls --no-colors --no-alias 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sed 's/^v//' | sort -u)"
+  protected="$(
+    setopt null_glob
+    printf '%s\n' "$active"
+    for alias_file in "${NVM_DIR:-$HOME/.nvm}"/alias/*; do
+      [[ -f "$alias_file" ]] && nvm version "${alias_file##*/}" 2>/dev/null
+    done
+    printf '%s\n' "${MACSMITH_NVM_KEEP:-}" | tr ', ' '\n'
+    _runtime_pins .nvmrc .node-version | while IFS= read -r pin; do
+      nvm version "$pin" 2>/dev/null || printf '%s\n' "$pin"
+    done
+  )"
+  _prune_superseded nvm MACSMITH_CLEAN_NVM 1 "$installed" "$(printf '%s\n' "$protected" | sed 's/^v//')" nvm uninstall
+}
+
+# chruby has no uninstall command; a ruby-install build is just its directory.
+# shellcheck disable=SC2329  # invoked through _prune_superseded's "$@"
+_chruby_remove_ruby() {
+  [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  rm -rf "$HOME/.rubies/ruby-$1"
+}
+
+_chruby_prune_superseded() {
+  local target="$1" active_root="${RUBY_ROOT:-}" installed="" protected="" dir=""
+  [[ -n "$target" ]] || return 0
+  _runtime_ref_scan
+  installed="$(
+    setopt null_glob
+    for dir in "$HOME/.rubies"/ruby-*; do
+      [[ -d "$dir" ]] && printf '%s\n' "${dir##*/ruby-}"
+    done
+  )"
+  protected="$(
+    printf '%s\n' "$target" "${active_root##*/}"
+    printf '%s\n' "${MACSMITH_CHRUBY_KEEP:-}" | tr ', ' '\n'
+    _runtime_pins .ruby-version
+  )"
+  _prune_superseded chruby MACSMITH_CLEAN_CHRUBY 2 "$installed" "$(printf '%s\n' "$protected" | sed 's/^ruby-//')" _chruby_remove_ruby
+}
+
+# Release toolchains only (snapshots stay), and nothing at all unless swiftly reports
+# which toolchain is in use or the default.
+_swiftly_prune_superseded() {
+  local listing="" installed="" protected=""
+  listing="$(swiftly list 2>/dev/null)" || return 0
+  installed="$(printf '%s\n' "$listing" | sed -n -E 's/^Swift ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')"
+  protected="$(printf '%s\n' "$listing" | sed -n -E 's/^Swift ([0-9]+\.[0-9]+\.[0-9]+).*\((in use|default)\).*/\1/p')"
+  [[ -n "$installed" && -n "$protected" ]] || return 0
+  _runtime_ref_scan
+  protected+=$'\n'"$(printf '%s\n' "${MACSMITH_SWIFTLY_KEEP:-}" | tr ', ' '\n'; _runtime_pins .swift-version)"
+  _prune_superseded swiftly MACSMITH_CLEAN_SWIFTLY 1 "$installed" "$protected" swiftly uninstall --assume-yes
+}
+
 # GO HELPERS
 
 _go_update_toolchain() {
@@ -1166,7 +1349,9 @@ _update_impl() {
       # `nvm install --lts` already activates the version; calling `nvm use
       # --lts` afterwards would re-print "Now using node vX.Y.Z".
       nvm install --lts && npm install -g npm@latest
-      return $?
+      local _node_rc=$?
+      _is_disabled "${MACSMITH_CLEAN_NVM:-}" || _nvm_prune_superseded "$(nvm current 2>/dev/null)"
+      return $_node_rc
       ;;
     python|pyenv|pipx|conda)
       local _py_rc=0
@@ -1219,7 +1404,9 @@ _update_impl() {
       echo "${GREEN}[Swift]${NC} swiftly self-update + install latest"
       # Run from $HOME so `install --use` doesn't rewrite a project-local/ancestor .swift-version.
       swiftly self-update && (cd "$HOME" && swiftly install latest --use)
-      return $?
+      local _swift_rc=$?
+      _is_disabled "${MACSMITH_CLEAN_SWIFTLY:-}" || _swiftly_prune_superseded
+      return $_swift_rc
       ;;
     go|golang)
       if ! command -v brew >/dev/null 2>&1; then
@@ -1321,17 +1508,17 @@ Usage: update [target]
 
 Targets:
   all                 Run the full update (default; Homebrew, all language
-                      runtimes, package managers). Old-version pruning is
-                      opt-in — see MACSMITH_CLEAN_* below.
+                      runtimes, package managers). Superseded runtime
+                      versions are pruned — see MACSMITH_CLEAN_* below.
   brew | homebrew     brew update + upgrade + cleanup (autoremove if MACSMITH_CLEAN_BREW=1)
   macports            sudo port selfupdate + upgrade outdated
-  node | nvm | npm    Install/use latest LTS, bump npm
+  node | nvm | npm    Install/use latest LTS, bump npm, prune superseded Node versions
   python | pyenv |    pyenv rehash, drop fabricated pyenv links, repair +
     pipx | conda      upgrade pipx venvs, conda update
   ruby | chruby |     gem update (180s timeout; cleanup if MACSMITH_CLEAN_GEM=1)
     rubygems | gem
   rust | rustup       rustup update
-  swift | swiftly     swiftly self-update + install latest
+  swift | swiftly     swiftly self-update + install latest, prune superseded toolchains
   go | golang         brew upgrade go
   dotnet | net        dotnet workload + global tools update
   nix                 nix profile upgrade + gc
@@ -1345,12 +1532,17 @@ Targets:
 Environment:
   MACSMITH_ALLOW_PROJECT_MODIFY=1  Opt in to running update from a project directory
   MACSMITH_UPDATE_WORKDIR=DIR       Safe working directory for update package-manager calls
-  MACSMITH_CLEAN_PYENV=1            Opt in to pruning old pyenv versions (off by default)
-  MACSMITH_CLEAN_NVM=1              Opt in to pruning old Node versions (off by default)
-  MACSMITH_CLEAN_CHRUBY=1           Opt in to pruning old chruby rubies (off by default)
+  MACSMITH_CLEAN_{PYENV,NVM,CHRUBY,SWIFTLY}=0
+                                    Keep superseded runtime versions. By default update
+                                    removes older releases of a line (Python/Ruby X.Y,
+                                    Node/Swift major) that has a newer install, unless
+                                    active, default, kept or used by a pin/venv in \$HOME
+  MACSMITH_CLEAN_{PYENV,NVM,CHRUBY}=1
+                                    Prune every version but the active one (ignores pins)
   MACSMITH_CLEAN_BREW=1             Opt in to brew autoremove during update (off by default)
   MACSMITH_CLEAN_GEM=1              Opt in to gem cleanup during update (off by default)
-  MACSMITH_{PYENV,NVM,CHRUBY}_KEEP  Extra versions to keep when the matching cleanup is on
+  MACSMITH_{PYENV,NVM,CHRUBY,SWIFTLY}_KEEP
+                                    Versions never pruned (comma or space separated)
 EOF
       return 0
       ;;
@@ -1627,11 +1819,13 @@ EOF
   local pybin=""
   local pyenv_target=""
   local current_python=""
+  local pyenv_previous=""
   local PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
-  
+
   # Get current Python version before upgrade
   if command -v pyenv >/dev/null 2>&1; then
     current_python="$(pyenv version-name 2>/dev/null || true)"
+    pyenv_previous="$current_python"
   else
     current_python="$(python3 -V 2>/dev/null | cut -d' ' -f2 || python -V 2>/dev/null | cut -d' ' -f2 || true)"
   fi
@@ -1718,6 +1912,10 @@ EOF
     fi
   fi
   [[ -z "$pybin" ]] && pybin="$(command -v python3 || command -v python || true)"
+  # pyenv's shims precede Homebrew on PATH; classify the interpreter a shim would run.
+  if [[ "$pybin" == "${PYENV_ROOT:-$HOME/.pyenv}/shims/"* ]]; then
+    pybin="$(pyenv which "${pybin##*/}" 2>/dev/null || true)"
+  fi
   if [[ -n "$pybin" ]]; then
     local python_errors=()
     local pyenv_version_dir=""
@@ -1956,7 +2154,7 @@ except Exception:
   fi
 
   if command -v pyenv >/dev/null 2>&1 && [[ -n "$pyenv_target" && "$pyenv_target" != "system" ]]; then
-    if ! _is_enabled "${MACSMITH_CLEAN_PYENV:-}"; then
+    if _is_disabled "${MACSMITH_CLEAN_PYENV:-}"; then
       local kept_versions="" kept_count=0 kept_ver="" kept_dir=""
       while IFS= read -r kept_ver; do
         [[ -z "$kept_ver" || "$kept_ver" == "$pyenv_target" ]] && continue
@@ -1967,9 +2165,9 @@ except Exception:
       done <<< "$(pyenv versions --bare 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$')"
       if (( kept_count > 0 )); then
         echo "${GREEN}[pyenv]${NC} Keeping $kept_count older version(s): $kept_versions"
-        echo "  ${BLUE}INFO:${NC} Pruning is opt-in so project .python-version pins survive; set MACSMITH_CLEAN_PYENV=1 to remove them"
+        echo "  ${BLUE}INFO:${NC} MACSMITH_CLEAN_PYENV=${MACSMITH_CLEAN_PYENV} keeps them; unset it to prune superseded patch releases"
       fi
-    else
+    elif _is_enabled "${MACSMITH_CLEAN_PYENV:-}"; then
       local keep_list_raw="${MACSMITH_PYENV_KEEP:-}"
       keep_list_raw="${keep_list_raw//,/ }"
       local versions_to_keep=("$pyenv_target" "system")
@@ -1994,6 +2192,8 @@ except Exception:
         pyenv uninstall -f "$ver" || echo "  ${RED}WARNING:${NC} Failed to remove $ver"
       done
       pyenv rehash 2>/dev/null || true
+    else
+      _pyenv_prune_superseded "$pyenv_target" "$pyenv_previous"
     fi
   fi
 
@@ -2031,9 +2231,9 @@ except Exception:
       nvm reinstall-packages "$prev_nvm" || _update_failed=1
     fi
     if [[ -n "$active_nvm" && "$active_nvm" != "system" ]]; then
-      if ! _is_enabled "${MACSMITH_CLEAN_NVM:-}"; then
-        echo "${GREEN}[nvm]${NC} Old-version cleanup is opt-in (protects project .nvmrc pins); set MACSMITH_CLEAN_NVM=1 to prune"
-      else
+      if _is_disabled "${MACSMITH_CLEAN_NVM:-}"; then
+        echo "${GREEN}[nvm]${NC} Superseded-version cleanup is off (MACSMITH_CLEAN_NVM=${MACSMITH_CLEAN_NVM})"
+      elif _is_enabled "${MACSMITH_CLEAN_NVM:-}"; then
         local keep_list_raw="${MACSMITH_NVM_KEEP:-}"
         keep_list_raw="${keep_list_raw//,/ }"
         local keep_versions=("$active_nvm")
@@ -2063,6 +2263,8 @@ except Exception:
           echo "  removing $ver"
           nvm uninstall "$ver" || echo "  ${RED}WARNING:${NC} Failed to remove $ver"
         done < <(nvm ls --no-colors --no-alias 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -u)
+      else
+        _nvm_prune_superseded "$active_nvm"
       fi
     fi
   elif [[ "$nvm_available" != "true" ]] && command -v brew >/dev/null 2>&1 && brew list node >/dev/null 2>&1; then
@@ -2254,9 +2456,9 @@ except Exception:
   if [[ "$chruby_available" == "true" ]] && [[ -n "$chruby_target" ]]; then
     local rubies_root="$HOME/.rubies"
     if [[ -d "$rubies_root" ]]; then
-      if ! _is_enabled "${MACSMITH_CLEAN_CHRUBY:-}"; then
-        echo "${GREEN}[chruby]${NC} Old-version cleanup is opt-in (protects project .ruby-version pins); set MACSMITH_CLEAN_CHRUBY=1 to prune"
-      else
+      if _is_disabled "${MACSMITH_CLEAN_CHRUBY:-}"; then
+        echo "${GREEN}[chruby]${NC} Superseded-version cleanup is off (MACSMITH_CLEAN_CHRUBY=${MACSMITH_CLEAN_CHRUBY})"
+      elif _is_enabled "${MACSMITH_CLEAN_CHRUBY:-}"; then
         local keep_list_raw="${MACSMITH_CHRUBY_KEEP:-}"
         keep_list_raw="${keep_list_raw//,/ }"
         local keep_versions=("$chruby_target")
@@ -2285,6 +2487,8 @@ except Exception:
           echo "  removing $ruby_version"
           rm -rf "$dir" || echo "  ${RED}WARNING:${NC} Failed to remove $ruby_version"
         done
+      else
+        _chruby_prune_superseded "$chruby_target"
       fi
     fi
   fi
@@ -2451,6 +2655,8 @@ except Exception:
         fi
       fi
     fi
+    # Every release is a separate ~5 GB toolchain; drop the ones a newer install superseded.
+    _is_disabled "${MACSMITH_CLEAN_SWIFTLY:-}" || _swiftly_prune_superseded
   elif command -v swift >/dev/null 2>&1; then
     echo "${GREEN}[Swift]${NC} Swift found (system or Homebrew installation)"
     local swift_version="$(swift --version 2>/dev/null | head -n1 | sed 's/.*version //' | cut -d' ' -f1 || echo "unknown")"
@@ -4664,9 +4870,10 @@ _print_main_help() {
   echo ""
   echo "Optional environment variables:"
   echo "  MACSMITH_FIX_RUBY_GEMS=0|disabled    Disable Ruby gem auto-fix (on by default)"
-  echo "  MACSMITH_CLEAN_PYENV=1               Opt in to pruning old pyenv versions (MACSMITH_PYENV_KEEP=...)"
-  echo "  MACSMITH_CLEAN_NVM=1                 Opt in to pruning old Node versions (MACSMITH_NVM_KEEP=...)"
-  echo "  MACSMITH_CLEAN_CHRUBY=1              Opt in to pruning old chruby rubies (MACSMITH_CHRUBY_KEEP=...)"
+  echo "  MACSMITH_CLEAN_PYENV=0               Keep superseded pyenv versions (pruned by default; MACSMITH_PYENV_KEEP=...)"
+  echo "  MACSMITH_CLEAN_NVM=0                 Keep superseded Node versions (pruned by default; MACSMITH_NVM_KEEP=...)"
+  echo "  MACSMITH_CLEAN_CHRUBY=0              Keep superseded chruby rubies (pruned by default; MACSMITH_CHRUBY_KEEP=...)"
+  echo "  MACSMITH_CLEAN_SWIFTLY=0             Keep superseded Swift toolchains (pruned by default; MACSMITH_SWIFTLY_KEEP=...)"
   echo "  MACSMITH_CLEAN_BREW=1                Opt in to 'brew autoremove' during update (off by default)"
   echo "  MACSMITH_CLEAN_GEM=1                 Opt in to 'gem cleanup' during update (off by default)"
   echo "  MACSMITH_SWIFT_SNAPSHOTS=1           Enable Swift development snapshot updates"

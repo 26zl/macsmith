@@ -1204,15 +1204,25 @@ if [[ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]]; then
   source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
 fi
 
-# Final PATH reordering: Ensure Homebrew is ALWAYS first, even after Nix
+# Final PATH reordering: Ensure Homebrew comes first, even after Nix
 # Nix may add paths that come before Homebrew, so we re-apply Homebrew first
 HOMEBREW_PREFIX="$(_detect_brew_prefix)"
 if [[ -n "$HOMEBREW_PREFIX" ]]; then
   {
     # Remove Homebrew paths from current PATH
     cleaned_path=$(echo "$PATH" | tr ':' '\n' | grep -v "^$HOMEBREW_PREFIX/bin$" | grep -v "^$HOMEBREW_PREFIX/sbin$" | tr '\n' ':' | sed 's/:$//' 2>/dev/null)
-    # Rebuild PATH with Homebrew ABSOLUTELY FIRST, then others
+    # Rebuild PATH with Homebrew first, then others
     export PATH="$HOMEBREW_PREFIX/bin:$HOMEBREW_PREFIX/sbin${cleaned_path:+:$cleaned_path}"
+    # Only pyenv's shims (when a pyenv init above put them on PATH) stay ahead of Homebrew:
+    # python@3.x links python3/pip3 into its bin, which would otherwise bypass pyenv.
+    _pyenv_shims="${PYENV_ROOT:-$HOME/.pyenv}/shims"
+    case ":$PATH:" in
+      *":$_pyenv_shims:"*)
+        cleaned_path=$(echo "$PATH" | tr ':' '\n' | grep -vxF "$_pyenv_shims" | tr '\n' ':' | sed 's/:$//' 2>/dev/null)
+        export PATH="$_pyenv_shims${cleaned_path:+:$cleaned_path}"
+        ;;
+    esac
+    unset _pyenv_shims
   } >/dev/null 2>&1
 fi
 # End macsmith managed block
@@ -1448,6 +1458,7 @@ install_sysadmin_tools() {
     echo "${GREEN}✅ DevOps/SRE tools already installed (skipping prompt)${NC}"
   elif _ask_user "${YELLOW}📦 Install DevOps/SRE tools (kubectl, Terraform, ansible, awscli, gcloud, k9s, powershell, ...)?" "N"; then
     echo "  ${BLUE}INFO:${NC} Terraform is provided by HashiCorp's Homebrew tap"
+    echo "  ${BLUE}INFO:${NC} docker, docker compose and kubectl come with OrbStack (~/.orbstack/bin, after its first launch)"
     profile_failures=0
     if ! "$brew" tap hashicorp/tap </dev/null >/dev/null 2>&1; then
       warn "devops: failed to tap hashicorp/tap (terraform may fail)"
