@@ -94,7 +94,7 @@ Everything optional is behind a y/n prompt with a sensible default (press Enter 
 **Asked per tool during `./install.sh`**:
 
 - macOS package sources: `mas` **[N]**, `MacPorts` **[N]**, `Nix` **[N]**
-- Sysadmin profiles: power-user CLI **[Y]** (btop, ripgrep, bat, gh, lazygit, tmux, neovim, ghostty, …), crypto/secrets **[Y]** (age, sops, gnupg, pinentry-mac), netsec **[N]** (nmap, masscan, iperf3, Wireshark), devops/SRE **[N]** (kubectl, Terraform via HashiCorp tap, ansible, awscli, powershell, orbstack, …), databases **[N]** (mysql, postgresql)
+- Sysadmin profiles: power-user CLI **[Y]** (btop, ripgrep, bat, gh, lazygit, tmux, neovim, ghostty, …), crypto/secrets **[Y]** (age, sops, gnupg, pinentry-mac), netsec **[N]** (nmap, masscan, iperf3, Wireshark), devops/SRE **[N]** (orbstack with its docker/kubectl, Terraform via HashiCorp tap, ansible, awscli, powershell, …), databases **[N]** (mysql, postgresql)
 
 **Asked per tool during `./dev-tools.sh`**:
 
@@ -103,7 +103,7 @@ Everything optional is behind a y/n prompt with a sensible default (press Enter 
 - AI tools **[Y]**: Claude Code, Ollama, OpenCode (via official installers), llm (via Homebrew)
 - JVM extras batch **[N]**: Kotlin, Scala, Clojure, Gradle, Maven, Groovy
 
-**Maintenance**: `update` keeps every formula, cask, and language runtime current; `verify` shows gaps. Project-local files (`package.json`, `go.mod`, `.swift-version`, …) are never touched.
+**Maintenance**: `update` keeps every formula, cask, and language runtime current and removes runtime releases that a newer install of the same line superseded (see `MACSMITH_CLEAN_*` under [Options](#options)); `verify` shows gaps. Project-local files (`package.json`, `go.mod`, `.swift-version`, …) are never touched.
 
 ## What changes on your machine
 
@@ -127,7 +127,7 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
   - `power-user` **[Y]**: 29 formulae + 1 cask (btop, ripgrep, bat, gh, lazygit, tmux, neovim, chezmoi, wget, just, cmake, coreutils, ghostty, …)
   - `crypto/secrets` **[Y]**: 4 formulae (age, sops, gnupg, pinentry-mac)
   - `netsec` **[N]**: 3 formulae + 1 cask (nmap, masscan, iperf3, Wireshark app) — strictly network-layer tools; web-app / DB-exploit scanners are deliberately excluded
-  - `devops/SRE` **[N]**: 18 formulae + 3 casks (kubectl, Terraform via `hashicorp/tap`, ansible, awscli, docker, powershell, orbstack, google-cloud-sdk, multipass, …)
+  - `devops/SRE` **[N]**: 14 formulae + 4 casks (Terraform via `hashicorp/tap`, ansible, awscli, helm, k9s, powershell, orbstack — which provides docker, docker compose and kubectl — azure-cli, google-cloud-sdk, multipass, …)
   - `databases` **[N]**: 2 formulae (mysql, postgresql@17)
 - **Language toolchains** (via `./dev-tools.sh`, each one its own `[Y]`/`[N]` prompt):
   - Python → `~/.pyenv/`
@@ -175,7 +175,7 @@ Concrete footprint before you commit to `curl | zsh`. Everything destructive to 
 - `MACSMITH_FIX_RUBY_GEMS=1` — auto-fix Ruby gem permissions during `update` (on by default; set `0` to disable)
 - `MACSMITH_ALLOW_CHECKSUM_ONLY_UPGRADE=1` — ⚠️ allow `upgrade` when GitHub provenance cannot be verified (off by default)
 - `MACSMITH_ALLOW_UNSIGNED_UPGRADE=1` — ⚠️ opt `upgrade` into downloading GitHub's **unverified** zipball when a tag has no checksummed release asset (off by default; normal releases ship a verified `.sha256`)
-- `MACSMITH_CLEAN_PYENV=1` / `MACSMITH_CLEAN_NVM=1` / `MACSMITH_CLEAN_CHRUBY=1` — **opt in** to pruning old language-runtime versions during `update` (off by default, so a version another project pins via `.python-version`/`.nvmrc`/`.ruby-version` is never deleted). Pair with `MACSMITH_{PYENV,NVM,CHRUBY}_KEEP="ver1,ver2"` to keep extra versions.
+- `MACSMITH_CLEAN_PYENV` / `MACSMITH_CLEAN_NVM` / `MACSMITH_CLEAN_CHRUBY` / `MACSMITH_CLEAN_SWIFTLY` — `update` installs every new runtime release, so by default it also removes the *superseded* ones: older releases of a line that still has a newer install (Python and Ruby `X.Y`, Node and Swift by major version). It keeps the active and default versions (and, for pyenv, the global it just rotated away from, until the next `update`, since its pip installs are not migrated), anything in `MACSMITH_{PYENV,NVM,CHRUBY,SWIFTLY}_KEEP="ver1,ver2"`, and every version a `.python-version`/`.nvmrc`/`.node-version`/`.ruby-version`/`.swift-version` pin or a virtualenv still uses, as found by a scan of `$HOME` six levels deep (Poetry's env cache included; pins elsewhere belong in `*_KEEP`). Set `=0` to keep everything; `=1` (pyenv/nvm/chruby) widens pruning to every version except the active one and `*_KEEP`, ignoring pins.
 - `MACSMITH_CLEAN_BREW=1` / `MACSMITH_CLEAN_GEM=1` — **opt in** to `brew autoremove` / `gem cleanup` during `update` (off by default; otherwise `update` prints what `brew autoremove` *would* remove but deletes nothing, so a dependency-only formula or old gem version a project relies on is never removed unattended).
 - `MACSMITH_UPDATE_WORKDIR=<dir>` — safe working directory for `update` package-manager calls
 - `MACSMITH_ALLOW_PROJECT_MODIFY=1` — explicit opt-in to run `update` from the current project directory

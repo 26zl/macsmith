@@ -285,6 +285,176 @@ else
   fail "autoremove dry-run output — quiet: [$autoremove_quiet] listed: [$autoremove_listed]"
 fi
 
+# Default runtime pruning removes only superseded versions (fixtures mirror a real
+# machine: nine nvm Nodes, one of them pinned by .nvmrc; four ~5 GB Swift toolchains).
+superseded_fn="$(extract_function "$repo_root/macsmith.sh" _superseded_versions)"
+superseded_ok=1
+superseded_check() {  # depth installed protected expected
+  local got=""
+  got="$(eval "$superseded_fn"; _superseded_versions "$1" "$2" "$3" | tr '\n' ' ')"
+  [[ "$got" == "$4" ]] && return 0
+  print -ru2 -- "  _superseded_versions $1: got [$got], want [$4]"
+  return 1
+}
+node_installed=$'24.18.0\n24.18.1\n24.19.0\n24.20.0\n24.21.0\n24.22.0\n24.22.1\n26.13.0\n26.13.1'
+swift_installed=$'6.3.3\n6.4.0\n6.4.1\n6.4.2'
+if [[ -z "$superseded_fn" ]]; then
+  superseded_ok=0
+else
+  superseded_check 1 "$node_installed" $'26.13.1\n24.21.0' '24.18.0 24.18.1 24.19.0 24.20.0 24.22.0 26.13.0 ' || superseded_ok=0
+  superseded_check 1 "$node_installed" $'26.13.1\n24.21\nN/A\nlts/*' '24.18.0 24.18.1 24.19.0 24.20.0 24.22.0 26.13.0 ' || superseded_ok=0
+  superseded_check 2 $'3.14.2\n3.15.0\n3.15.1\n3.15.2\n3.15.0t\nmy-venv' '3.15.2' '3.15.0 3.15.1 ' || superseded_ok=0
+  superseded_check 1 "$swift_installed" '6.4.2' '6.3.3 6.4.0 6.4.1 ' || superseded_ok=0
+  superseded_check 1 "$swift_installed" $'6.4.2\n6.3' '6.4.0 6.4.1 ' || superseded_ok=0
+  superseded_check 2 $'3.4.10\n3.4.6\n3.3.9' 'ruby-x' '3.4.6 ' || superseded_ok=0
+  superseded_check 1 '' '26.13.1' '' || superseded_ok=0
+fi
+if [[ $superseded_ok -eq 1 ]]; then
+  pass "runtime pruning selects only superseded versions (newest per line, protected and prefix-pinned ones stay)"
+else
+  fail "runtime pruning selection"
+fi
+
+# The pin/venv scan is bounded to $HOME (6 levels, Library/node_modules skipped) plus Poetry's cache.
+refs_home="$tmp_root/refs-home"
+mkdir -p "$refs_home/code/app" "$refs_home/code/web/node_modules/dep" "$refs_home/a/b/c/d/e/f" \
+  "$refs_home/code/api/.venv" "$refs_home/Library/Caches/pypoetry/virtualenvs/tool-py3.12" \
+  "$refs_home/Library/Other" "$refs_home/.pyenv/versions/3.14.1/envs/legacy"
+print -r -- 'v24.21.0' >"$refs_home/code/app/.nvmrc"
+print -r -- '99.0.0' >"$refs_home/code/web/node_modules/dep/.nvmrc"
+print -r -- '98.0.0' >"$refs_home/a/b/c/d/e/f/.nvmrc"
+print -r -- '97.0.0' >"$refs_home/Library/Other/.nvmrc"
+printf '%s\n' '# project pin' '3.15.1 3.13.9' >"$refs_home/code/app/.python-version"
+printf 'home = %s\n' "$refs_home/.pyenv/versions/3.15.0/bin" >"$refs_home/code/api/.venv/pyvenv.cfg"
+printf 'home = %s\n' "$refs_home/.pyenv/versions/3.12.4/bin" \
+  >"$refs_home/Library/Caches/pypoetry/virtualenvs/tool-py3.12/pyvenv.cfg"
+refs_fns="$(
+  extract_function "$repo_root/macsmith.sh" _runtime_ref_scan
+  extract_function "$repo_root/macsmith.sh" _runtime_pins
+  extract_function "$repo_root/macsmith.sh" _pyenv_referenced_versions
+)"
+refs_script="$(cat <<'SCRIPT'
+_RUNTIME_REF_FILES='' _RUNTIME_REF_SCANNED=false
+_runtime_ref_scan
+print -r -- "nvm:$(_runtime_pins .nvmrc | tr '\n' ' ')"
+print -r -- "py:$(_runtime_pins .python-version | tr '\n' ' ')"
+print -r -- "venv:$(_pyenv_referenced_versions | sort | tr '\n' ' ')"
+SCRIPT
+)"
+refs_out="$(env -i HOME="$refs_home" PYENV_ROOT="$refs_home/.pyenv" PATH=/usr/bin:/bin \
+  /bin/zsh -f -c "$refs_fns"$'\n'"$refs_script")"
+if [[ "$refs_out" == $'nvm:v24.21.0 \npy:3.15.1 3.13.9 \nvenv:3.12.4 3.14.1 3.15.0 ' ]]; then
+  pass "pin/venv scan finds project pins and venv interpreters, skips node_modules, Library and >6 levels"
+else
+  fail "pin/venv scan returned: $refs_out"
+fi
+
+# Each tool's pruning keeps its active/default/pinned/venv-backed versions and removes only the rest.
+prune_root="$tmp_root/prune"
+mkdir -p "$prune_root/bin" "$prune_root/home/proj" "$prune_root/home/api/.venv" "$prune_root/home/.nvm/alias" \
+  "$prune_root/home/.pyenv/versions/3.14.0/envs/legacy" "$prune_root/home/.rubies/ruby-3.3.9" \
+  "$prune_root/home/.rubies/ruby-3.4.5" "$prune_root/home/.rubies/ruby-3.4.6" "$prune_root/home/.rubies/ruby-3.4.7"
+print -r -- 'v24.21.0' >"$prune_root/home/proj/.nvmrc"
+print -r -- '3.15.1' >"$prune_root/home/proj/.python-version"
+print -r -- 'ruby-3.4.6' >"$prune_root/home/proj/.ruby-version"
+print -r -- '6.3' >"$prune_root/home/proj/.swift-version"
+print -r -- '24.20' >"$prune_root/home/.nvm/alias/default"
+print -r -- '3.15.2' >"$prune_root/home/.pyenv/version"
+printf 'home = %s\n' "$prune_root/home/.pyenv/versions/3.15.0/bin" >"$prune_root/home/api/.venv/pyvenv.cfg"
+cat >"$prune_root/bin/pyenv" <<'FAKE'
+#!/bin/sh
+case "$1" in
+  versions) printf '%s\n' 3.13.7 3.13.8 3.13.9 3.14.0 3.14.2 3.15.0 3.15.1 3.15.2 3.15.0t legacy ;;
+  version-name) echo 3.15.2 ;;
+  uninstall) echo "pyenv $3" >>"$PRUNE_LOG" ;;
+esac
+exit 0
+FAKE
+cat >"$prune_root/bin/swiftly" <<'FAKE'
+#!/bin/sh
+case "$1" in
+  list)
+    marks=' (in use) (default)'
+    [ -n "${SWIFTLY_UNMARKED:-}" ] && marks=''
+    printf '%s\n' 'Installed release toolchains' '----------------------------' "Swift 6.4.2$marks" \
+      'Swift 6.4.1' 'Swift 6.4.0' 'Swift 6.3.3' 'Swift 6.2.1' '' 'Installed snapshot toolchains' \
+      '-----------------------------' 'main-snapshot-2026-10-01' ;;
+  uninstall) echo "swiftly $2 $3" >>"$PRUNE_LOG" ;;
+esac
+exit 0
+FAKE
+chmod 700 "$prune_root/bin/pyenv" "$prune_root/bin/swiftly"
+prune_fns="$(
+  for prune_fn in _runtime_ref_scan _runtime_pins _pyenv_referenced_versions _superseded_versions \
+    _prune_superseded _pyenv_prune_superseded _nvm_prune_superseded _chruby_remove_ruby \
+    _chruby_prune_superseded _swiftly_prune_superseded; do
+    extract_function "$repo_root/macsmith.sh" "$prune_fn"
+  done
+)"
+# The nvm stand-in replaces the shell function the extracted helpers call.
+prune_script="$(cat <<'SCRIPT'
+GREEN='' RED='' NC='' _RUNTIME_REF_FILES='' _RUNTIME_REF_SCANNED=false
+nvm() {
+  case "$1" in
+    ls) printf '%s\n' '       v24.18.0' '       v24.20.0' '       v24.21.0' '       v24.22.1' '->     v26.13.0' '       v26.13.1' ;;
+    version)
+      case "$2" in
+        default) print -r -- v24.20.0 ;;
+        v24.21.0) print -r -- v24.21.0 ;;
+        *) print -r -- N/A; return 3 ;;
+      esac ;;
+    uninstall) print -r -- "nvm $2" >>"$PRUNE_LOG" ;;
+  esac
+}
+_pyenv_prune_superseded 3.15.2 3.13.8 >/dev/null
+_nvm_prune_superseded v26.13.0 >/dev/null
+_chruby_prune_superseded ruby-3.4.7 >/dev/null
+_swiftly_prune_superseded >/dev/null
+export SWIFTLY_UNMARKED=1
+_swiftly_prune_superseded >/dev/null
+SCRIPT
+)"
+env -i HOME="$prune_root/home" PYENV_ROOT="$prune_root/home/.pyenv" NVM_DIR="$prune_root/home/.nvm" \
+  PATH="$prune_root/bin:/usr/bin:/bin" PRUNE_LOG="$prune_root/removed" MACSMITH_SWIFTLY_KEEP='6.1.0, 6.4.0' \
+  /bin/zsh -f -c "$prune_fns"$'\n'"$prune_script"
+prune_log="$(tr '\n' '|' <"$prune_root/removed" 2>/dev/null)"
+prune_rubies="$(cd "$prune_root/home/.rubies" && print -r -- *)"
+if [[ "$prune_log" == 'pyenv 3.13.7|nvm 24.18.0|swiftly --assume-yes 6.2.1|swiftly --assume-yes 6.4.1|' \
+  && "$prune_rubies" == 'ruby-3.3.9 ruby-3.4.6 ruby-3.4.7' ]]; then
+  pass "pyenv/nvm/chruby/swiftly pruning keeps active, default, KEEP, pinned and venv-backed versions"
+else
+  fail "runtime pruning removed: [$prune_log], rubies left: [$prune_rubies]"
+fi
+
+# Final PATH cleanups: pyenv's shims stay ahead of Homebrew (python@3.x links python3/pip3
+# into Homebrew's bin), and nothing else moves ahead of Homebrew (CI's login-PATH contract).
+path_home="$tmp_root/path-home"
+path_brew="$tmp_root/path-brew"
+path_shims="$path_home/.pyenv/shims"
+mkdir -p "$path_shims" "$path_brew/bin" "$path_brew/sbin"
+zshrc_cleanup="$(sed -n '/^# =* FINAL PATH CLEANUP =*$/,/^# TOOL HOOKS$/p' "$repo_root/zsh.sh")"
+zprofile_block="$(sed -n '/^# =.* FINAL PATH CLEANUP (FOR \.ZPROFILE) =.*$/,/^# End macsmith managed block$/p' "$repo_root/install.sh")"
+path_after() {  # script PATH [HOMEBREW_PREFIX]
+  env -i HOME="$path_home" PYENV_ROOT="$path_home/.pyenv" PATH="$2" HOMEBREW_PREFIX="${3:-}" \
+    /bin/zsh -f -c "$1"$'\n'"print -r -- \"\$PATH\""
+}
+path_ok=1
+[[ -n "$zshrc_cleanup" && -n "$zprofile_block" ]] || path_ok=0
+[[ "$(path_after "$zshrc_cleanup" "$path_shims:$path_home/.local/bin:$path_brew/bin:/usr/bin:/bin" "$path_brew")" \
+  == "$path_shims:$path_brew/bin:$path_brew/sbin:$path_home/.local/bin:/usr/bin:/bin" ]] || path_ok=0
+[[ "$(path_after "$zshrc_cleanup" "$path_home/.cargo/bin:$path_brew/bin:/usr/bin:/bin" "$path_brew")" \
+  == "$path_brew/bin:$path_brew/sbin:$path_home/.cargo/bin:/usr/bin:/bin" ]] || path_ok=0
+real_brew="$(eval "$(extract_function "$repo_root/zsh.sh" _detect_brew_prefix)"; _detect_brew_prefix)"
+if [[ -n "$real_brew" ]]; then
+  [[ "$(path_after "$zprofile_block" "$path_shims:/usr/bin:/bin")" == "$path_shims:$real_brew/bin:"* ]] || path_ok=0
+  [[ "$(path_after "$zprofile_block" "/usr/bin:/bin")" == "$real_brew/bin:"* ]] || path_ok=0
+fi
+if [[ $path_ok -eq 1 ]]; then
+  pass "final PATH cleanups keep pyenv shims ahead of Homebrew and Homebrew ahead of everything else"
+else
+  fail "final PATH cleanup ordering (pyenv shims vs Homebrew)"
+fi
+
 # nvm.sh declares `local VERSION` twice in nvm(); without TYPESET_SILENT zsh echoes VERSION='' mid-update.
 if grep -Eq '^setopt typeset_silent' "$repo_root/macsmith.sh"; then
   pass "update silences zsh's duplicate-local echo (nvm's VERSION='' line)"

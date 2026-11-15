@@ -489,7 +489,7 @@ if [[ "${MACSMITH_UPDATE_CHECK:-0}" == "1" ]]; then
 fi
 
 # ================================ FINAL PATH CLEANUP =======================
-# Move Homebrew first without reordering the rest of PATH.
+# Move Homebrew first (behind pyenv's shims) without reordering the rest of PATH.
 # Wrapped in command grouping to suppress any stray variable output.
 [[ -n "${HOMEBREW_PREFIX:-}" ]] || HOMEBREW_PREFIX="$(_detect_brew_prefix)"
 if [[ -n "$HOMEBREW_PREFIX" ]]; then
@@ -499,6 +499,16 @@ if [[ -n "$HOMEBREW_PREFIX" ]]; then
     # Rebuild PATH with Homebrew first
     # Omit an empty trailing PATH segment because it represents the current directory.
     export PATH="$HOMEBREW_PREFIX/bin:$HOMEBREW_PREFIX/sbin${cleaned_path:+:$cleaned_path}"
+    # pyenv's shims stay ahead of Homebrew: python@3.x links python3/pip3 into its bin,
+    # which would otherwise bypass the pyenv version for python3/pip3 but not python/pip.
+    _pyenv_shims="${PYENV_ROOT:-$HOME/.pyenv}/shims"
+    case ":$PATH:" in
+      *":$_pyenv_shims:"*)
+        cleaned_path=$(echo "$PATH" | tr ':' '\n' | grep -vxF "$_pyenv_shims" | tr '\n' ':' | sed 's/:$//' 2>/dev/null)
+        export PATH="$_pyenv_shims${cleaned_path:+:$cleaned_path}"
+        ;;
+    esac
+    unset _pyenv_shims
   } >/dev/null 2>&1
 else
   # No Homebrew, just clean normally
