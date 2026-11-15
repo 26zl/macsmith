@@ -486,6 +486,75 @@ else
   [[ -n "$manifest_errors" ]] && print -ru2 -- "$manifest_errors"
 fi
 
+# A gem whose CLI fails --version/-v/--help is reinstalled only when it does not load: minitest 6's
+# test runner exits 1 outside a project, and update used to "fix" it with a reinstall every run.
+gem_root="$(mktemp -d "${TMPDIR:-/tmp}/macsmith-gems.XXXXXX")"
+mkdir -p "$gem_root/bin"
+print -rl -- '#!/bin/sh' 'exit 1' > "$gem_root/bin/runner-cli"
+print -rl -- '#!/bin/sh' 'exit 1' > "$gem_root/bin/broken-cli"
+print -rl -- '#!/bin/sh' 'exit 0' > "$gem_root/bin/good-cli"
+chmod +x "$gem_root/bin/"*
+gem_fix_out="$(
+  PATH="$gem_root/bin:/usr/bin:/bin"
+  GREEN="" RED="" BLUE="" NC=""
+  eval "$(extract_function "$repo_root/macsmith.sh" _probe_gem_executable)"
+  eval "$(extract_function "$repo_root/macsmith.sh" _fix_all_ruby_gems)"
+  # shellcheck disable=SC2329  # stand-ins called by the extracted function after eval
+  _timeout() { shift; "$@"; }
+  # shellcheck disable=SC2329
+  _is_enabled() { return 1; }
+  # shellcheck disable=SC2329
+  _is_project_directory() { return 1; }
+  # shellcheck disable=SC2329
+  _gem_loads() { [[ "$1" == runner-gem ]]; }
+  # shellcheck disable=SC2329
+  ruby() {
+    if [[ "$1" == -v ]]; then print -r -- "ruby 3.4.6 (test)"; return 0; fi
+    local last=""
+    for last; do :; done
+    case "$last" in runner-gem) print runner-cli ;; broken-gem) print broken-cli ;; good-gem) print good-cli ;; esac
+  }
+  # shellcheck disable=SC2329
+  gem() {
+    case "$1 $2" in
+      "list --no-versions") print -l runner-gem broken-gem good-gem ;;
+      list\ *) print -r -- "$2 (1.0.0)" ;;
+      install\ *) print -r -- "$2" >> "$gem_root/installed" ;;
+    esac
+  }
+  _fix_all_ruby_gems 2>&1
+)"
+if [[ "$(cat "$gem_root/installed" 2>/dev/null)" == broken-gem ]] \
+  && [[ "$gem_fix_out" == *"DETECTED: broken-gem executable is broken"* ]] \
+  && [[ "$gem_fix_out" != *"DETECTED: runner-gem"* ]] \
+  && [[ "$gem_fix_out" != *"DETECTED: good-gem"* ]] \
+  && [[ "$gem_fix_out" == *"(2 working properly)"* ]]; then
+  pass "gem auto-fix reinstalls only gems that do not load, not CLIs without a version flag"
+else
+  fail "gem auto-fix reinstalled: $(tr '\n' ' ' <"$gem_root/installed" 2>/dev/null || print none)"
+  print -ru2 -- "$gem_fix_out"
+fi
+
+if command -v ruby >/dev/null 2>&1 && ruby -e 'exit(Gem::Specification.find_by_name("bundler") ? 0 : 1)' >/dev/null 2>&1; then
+  print -r -- '#!/nonexistent/ruby' > "$gem_root/dead-shebang"
+  gem_loads_result="$(
+    eval "$(extract_function "$repo_root/macsmith.sh" _gem_loads)"
+    # shellcheck disable=SC2329
+    _timeout() { shift; "$@"; }
+    if _gem_loads bundler ""; then print -n "ok "; else print -n "FAIL "; fi
+    if _gem_loads bundler "$gem_root/dead-shebang"; then print -n "FAIL "; else print -n "ok "; fi
+    if _gem_loads no-such-gem-macsmith ""; then print -n "FAIL"; else print -n "ok"; fi
+  )"
+  if [[ "$gem_loads_result" == "ok ok ok" ]]; then
+    pass "_gem_loads accepts an installed gem and rejects a dead interpreter or a missing gem"
+  else
+    fail "_gem_loads verdicts wrong (bundler, dead shebang, missing gem): $gem_loads_result"
+  fi
+else
+  pass "_gem_loads real-Ruby check skipped (no Ruby with bundler on PATH)"
+fi
+command rm -rf -- "$gem_root"
+
 # zsh ties the array `path` (and fpath, cdpath, manpath, module_path, mailpath) to its scalar
 # twin: a loop or local named `path` replaces PATH for the rest of the function, which made
 # `update` report Go, Rust, .NET, chruby and mas as "Not found" once conda was absent.

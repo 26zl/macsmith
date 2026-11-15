@@ -261,6 +261,31 @@ _probe_gem_executable() {
   return 1
 }
 
+# A CLI can exit non-zero on --version/-v/--help without being broken: minitest 6's `minitest`
+# is a test runner that ignores those flags and fails outside a project with no ./test. So a
+# gem whose probe fails counts as broken only when it cannot load: its native extensions are
+# not built for this Ruby, it cannot be activated, or its executable's interpreter is gone.
+_gem_loads() {
+  local gem_name="$1" exe_path="${2:-}"
+  _timeout 30 ruby -rrubygems -e '
+    name, exe = ARGV
+    spec = (Gem::Specification.find_by_name(name) rescue exit(1))
+    exit(1) if spec.missing_extensions?
+    begin
+      gem name
+    rescue Gem::LoadError
+      exit(1)
+    end
+    if exe && !exe.empty? && File.file?(exe)
+      first = File.open(exe, &:gets).to_s
+      if first.start_with?("#!")
+        interpreter = first[2..].strip.split(/\s+/).first
+        exit(1) unless interpreter && File.executable?(interpreter)
+      end
+    end
+  ' -- "$gem_name" "$exe_path" </dev/null >/dev/null 2>&1
+}
+
 _fix_all_ruby_gems() {
   echo "${GREEN}[Ruby]${NC} Auto-fixing Ruby gems for compatibility..."
   
@@ -312,6 +337,9 @@ _fix_all_ruby_gems() {
       if command -v "$gem_executable" >/dev/null 2>&1; then
         # Test if the executable actually works
         if _probe_gem_executable "$gem_executable"; then
+          ((working_gems++))
+        elif _gem_loads "$gem" "$(command -v "$gem_executable")"; then
+          # It loads; the CLI just has no flag that exits 0 here (a test runner, for one).
           ((working_gems++))
         else
           is_problematic=true
